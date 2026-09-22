@@ -1,11 +1,23 @@
 # Changelog
 
+## v0.2.0
+
+- Reworked state machine around IEC 61851 / J1772 A/B1/B2/C1/C2/D1/D2/E/F semantics.
+- Added graceful stop C2/D2 -> C1/D1 with 6 s timeout.
+- Added State F (`Available = OFF`) with steady negative pilot.
+- Added State E output for pilot/diode faults.
+- Added explicit A/B/C/D ADC windows with invalid gaps.
+- Added bounded negative-half-cycle diode window and debounce time.
+- Added transient fault auto-retry and manual reset action.
+- Added optional State D charging gate (`allow_ventilation`, false by default).
+- Added physical CP state, fault reason and graceful-stop Home Assistant entities.
+- Added separate CI example using the local external component.
+
 ## v0.1.1
-- Standard ESPHome GPIO syntax for pilot ADC.
-- B1/B2 state reporting.
-- C1/C2 state reporting.
-- Explicit DC CP in A/B1 and PWM only in B2/C.
-- Contactor inhibited until stable C.
+
+- Accepted normal ESPHome GPIO syntax for `pilot_adc_pin`.
+- Added B1/B2 reporting.
 
 ## v0.1.0
+
 Initial experimental release.
