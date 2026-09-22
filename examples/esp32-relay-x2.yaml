@@ -1,0 +1,98 @@
+substitutions:
+  name: esp32-relay-x2-evse
+  friendly_name: ESP32 Relay X2 EVSE
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: "CI-DUMMY-WIFI"
+  password: "CI-DUMMY-PASSWORD"
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [evse]
+
+switch:
+  - platform: gpio
+    id: evse_contactor_hw
+    pin: GPIO16
+    restore_mode: ALWAYS_OFF
+    internal: true
+
+  - platform: template
+    name: "EVSE Enable"
+    id: evse_enable
+    restore_mode: ALWAYS_OFF
+    lambda: |-
+      return id(evse_controller).is_enabled();
+    turn_on_action:
+      - lambda: id(evse_controller).set_enabled(true);
+    turn_off_action:
+      - lambda: id(evse_controller).set_enabled(false);
+
+output:
+  - platform: ledc
+    id: cp_pwm
+    pin: GPIO25
+    frequency: 1000Hz
+
+number:
+  - platform: template
+    name: "EVSE Current Limit"
+    min_value: 6
+    max_value: 16
+    step: 1
+    unit_of_measurement: A
+    optimistic: true
+    restore_value: true
+    initial_value: 6
+    set_action:
+      - lambda: id(evse_controller).set_current_limit(x);
+
+evse:
+  id: evse_controller
+  pilot_output: cp_pwm
+  pilot_adc_pin: GPIO34
+  contactor: evse_contactor_hw
+  max_current: 16
+  default_current: 6
+  sample_interval: 20ms
+  sample_window_us: 1600
+  stable_time: 250ms
+  contactor_close_delay: 500ms
+
+  # PLACEHOLDERS - calibrate with your actual CP analog front-end.
+  state_a_min_raw: 3500
+  state_b_min_raw: 2800
+  state_c_min_raw: 2000
+  state_d_min_raw: 1200
+  diode_max_raw: 700
+
+  state:
+    name: "EVSE State"
+  cp_high_raw:
+    name: "EVSE CP High Raw"
+  cp_low_raw:
+    name: "EVSE CP Low Raw"
+  advertised_current:
+    name: "EVSE Advertised Current"
+  vehicle_connected:
+    name: "EVSE Vehicle Connected"
+  charging:
+    name: "EVSE Charging"
+  fault:
+    name: "EVSE Fault"
