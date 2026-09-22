@@ -21,10 +21,9 @@ wifi:
   password: "CI-DUMMY-PASSWORD"
 
 external_components:
-  - source:
-      type: local
-      path: ../components
+  - source: github://eugentib/esphome-evse@main
     components: [evse]
+    refresh: 1min
 
 switch:
   - platform: gpio
