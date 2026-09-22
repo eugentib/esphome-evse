@@ -17,8 +17,8 @@ ota:
   - platform: esphome
 
 wifi:
-  ssid: "CI-DUMMY-WIFI"
-  password: "CI-DUMMY-PASSWORD"
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
 
 external_components:
   - source: github://eugentib/esphome-evse@main
@@ -39,9 +39,11 @@ switch:
     lambda: |-
       return id(evse_controller).is_enabled();
     turn_on_action:
-      - lambda: id(evse_controller).set_enabled(true);
+      - lambda: |-
+          id(evse_controller).set_enabled(true);
     turn_off_action:
-      - lambda: id(evse_controller).set_enabled(false);
+      - lambda: |-
+          id(evse_controller).set_enabled(false);
 
 output:
   - platform: ledc
@@ -52,15 +54,18 @@ output:
 number:
   - platform: template
     name: "EVSE Current Limit"
+    id: evse_current_limit
     min_value: 6
     max_value: 16
     step: 1
     unit_of_measurement: A
+    mode: slider
     optimistic: true
     restore_value: true
     initial_value: 6
     set_action:
-      - lambda: id(evse_controller).set_current_limit(x);
+      - lambda: |-
+          id(evse_controller).set_current_limit(x);
 
 evse:
   id: evse_controller
@@ -73,14 +78,12 @@ evse:
   sample_window_us: 1600
   stable_time: 250ms
   contactor_close_delay: 500ms
-
-  # PLACEHOLDERS - calibrate with your actual CP analog front-end.
+  # PLACEHOLDERS - calibrate with actual CP analog front-end.
   state_a_min_raw: 3500
   state_b_min_raw: 2800
   state_c_min_raw: 2000
   state_d_min_raw: 1200
   diode_max_raw: 700
-
   state:
     name: "EVSE State"
   cp_high_raw:

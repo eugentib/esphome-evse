@@ -1,9 +1,5 @@
 name: ESPHome validation
-
-on:
-  push:
-  pull_request:
-
+on: [push, pull_request]
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -12,9 +8,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install ESPHome
-        run: python -m pip install --upgrade esphome
-      - name: Validate
-        run: esphome config examples/esp32-relay-x2.yaml
-      - name: Compile
-        run: esphome compile examples/esp32-relay-x2.yaml
+      - run: python -m pip install --upgrade esphome
+      - name: Prepare CI secrets
+        run: printf 'wifi_ssid: "CI-DUMMY-WIFI"\nwifi_password: "CI-DUMMY-PASSWORD"\n' > examples/secrets.yaml
+      - run: esphome config examples/esp32-relay-x2.yaml
+      - run: esphome compile examples/esp32-relay-x2.yaml

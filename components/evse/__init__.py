@@ -1,5 +1,6 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
+from esphome import pins
 from esphome.components import output, switch, sensor, binary_sensor, text_sensor
 from esphome.const import CONF_ID
 
@@ -34,7 +35,7 @@ EVSEComponent = evse_ns.class_("EVSEComponent", cg.Component)
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(EVSEComponent),
     cv.Required(CONF_PILOT_OUTPUT): cv.use_id(output.FloatOutput),
-    cv.Required(CONF_PILOT_ADC_PIN): cv.int_range(min=32, max=39),
+    cv.Required(CONF_PILOT_ADC_PIN): pins.internal_gpio_input_pin_schema,
     cv.Required(CONF_CONTACTOR): cv.use_id(switch.Switch),
     cv.Optional(CONF_MAX_CURRENT, default=16.0): cv.float_range(min=6.0, max=32.0),
     cv.Optional(CONF_DEFAULT_CURRENT, default=6.0): cv.float_range(min=6.0, max=32.0),
@@ -56,23 +57,23 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_FAULT): binary_sensor.binary_sensor_schema(),
 }).extend(cv.COMPONENT_SCHEMA)
 
-def _validate_thresholds(config):
-    a,b,c,d = [config[x] for x in (CONF_STATE_A_MIN_RAW,CONF_STATE_B_MIN_RAW,CONF_STATE_C_MIN_RAW,CONF_STATE_D_MIN_RAW)]
-    if not (a > b > c > d):
+def _validate(config):
+    a,b,c,d=(config[CONF_STATE_A_MIN_RAW],config[CONF_STATE_B_MIN_RAW],config[CONF_STATE_C_MIN_RAW],config[CONF_STATE_D_MIN_RAW])
+    if not (a>b>c>d):
         raise cv.Invalid("CP thresholds must satisfy A > B > C > D")
     if config[CONF_DEFAULT_CURRENT] > config[CONF_MAX_CURRENT]:
         raise cv.Invalid("default_current cannot exceed max_current")
     return config
-
-CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, _validate_thresholds)
+CONFIG_SCHEMA=cv.All(CONFIG_SCHEMA,_validate)
 
 async def to_code(config):
-    var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
-    pilot = await cg.get_variable(config[CONF_PILOT_OUTPUT])
-    contactor = await cg.get_variable(config[CONF_CONTACTOR])
+    var=cg.new_Pvariable(config[CONF_ID])
+    await cg.register_component(var,config)
+    pilot=await cg.get_variable(config[CONF_PILOT_OUTPUT])
+    contactor=await cg.get_variable(config[CONF_CONTACTOR])
+    pilot_adc_pin=await cg.gpio_pin_expression(config[CONF_PILOT_ADC_PIN])
     cg.add(var.set_pilot_output(pilot))
-    cg.add(var.set_pilot_adc_pin(config[CONF_PILOT_ADC_PIN]))
+    cg.add(var.set_pilot_adc_pin(pilot_adc_pin))
     cg.add(var.set_contactor(contactor))
     cg.add(var.set_max_current(config[CONF_MAX_CURRENT]))
     cg.add(var.set_default_current(config[CONF_DEFAULT_CURRENT]))
@@ -86,16 +87,16 @@ async def to_code(config):
     cg.add(var.set_state_d_min_raw(config[CONF_STATE_D_MIN_RAW]))
     cg.add(var.set_diode_max_raw(config[CONF_DIODE_MAX_RAW]))
     if CONF_STATE in config:
-        ent = await text_sensor.new_text_sensor(config[CONF_STATE]); cg.add(var.set_state_sensor(ent))
+        ent=await text_sensor.new_text_sensor(config[CONF_STATE]); cg.add(var.set_state_sensor(ent))
     if CONF_CP_HIGH_RAW in config:
-        ent = await sensor.new_sensor(config[CONF_CP_HIGH_RAW]); cg.add(var.set_cp_high_raw_sensor(ent))
+        ent=await sensor.new_sensor(config[CONF_CP_HIGH_RAW]); cg.add(var.set_cp_high_raw_sensor(ent))
     if CONF_CP_LOW_RAW in config:
-        ent = await sensor.new_sensor(config[CONF_CP_LOW_RAW]); cg.add(var.set_cp_low_raw_sensor(ent))
+        ent=await sensor.new_sensor(config[CONF_CP_LOW_RAW]); cg.add(var.set_cp_low_raw_sensor(ent))
     if CONF_ADVERTISED_CURRENT in config:
-        ent = await sensor.new_sensor(config[CONF_ADVERTISED_CURRENT]); cg.add(var.set_advertised_current_sensor(ent))
+        ent=await sensor.new_sensor(config[CONF_ADVERTISED_CURRENT]); cg.add(var.set_advertised_current_sensor(ent))
     if CONF_VEHICLE_CONNECTED in config:
-        ent = await binary_sensor.new_binary_sensor(config[CONF_VEHICLE_CONNECTED]); cg.add(var.set_vehicle_connected_sensor(ent))
+        ent=await binary_sensor.new_binary_sensor(config[CONF_VEHICLE_CONNECTED]); cg.add(var.set_vehicle_connected_sensor(ent))
     if CONF_CHARGING in config:
-        ent = await binary_sensor.new_binary_sensor(config[CONF_CHARGING]); cg.add(var.set_charging_sensor(ent))
+        ent=await binary_sensor.new_binary_sensor(config[CONF_CHARGING]); cg.add(var.set_charging_sensor(ent))
     if CONF_FAULT in config:
-        ent = await binary_sensor.new_binary_sensor(config[CONF_FAULT]); cg.add(var.set_fault_sensor(ent))
+        ent=await binary_sensor.new_binary_sensor(config[CONF_FAULT]); cg.add(var.set_fault_sensor(ent))
