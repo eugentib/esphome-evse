@@ -2,12 +2,12 @@
 
 Experimental IEC 61851 / SAE J1772 basic-signaling EVSE controller implemented as an ESPHome external component.
 
-**Current version: v0.2.0**  
+**Current version: v0.2.1**  
 **Target:** classic ESP32 / ESP32 Relay X2, single phase, fixed Type 2 cable.
 
 > This is experimental firmware for a DIY EVSE. It is not a certified safety controller. Mains protection, residual-current protection, PE integrity, contactor supervision, thermal protection and the analog CP interface remain hardware responsibilities and must be engineered/tested independently.
 
-## v0.2.0 highlights
+## v0.2.1 highlights
 
 - Explicit EVSE states: A, B1, B2, C1, C2, D1, D2, E and F.
 - State `1` means energy is not offered: CP held at +12 V DC and contactor open (except during graceful stop).
@@ -38,11 +38,11 @@ external_components:
     refresh: 1min
 ```
 
-After tagging v0.2.0:
+After tagging v0.2.1:
 
 ```yaml
 external_components:
-  - source: github://eugentib/esphome-evse@v0.2.0
+  - source: github://eugentib/esphome-evse@v0.2.1
     components: [evse]
     refresh: never
 ```
@@ -132,7 +132,7 @@ The example exposes:
 - EVSE Graceful Stop
 - EVSE Fault
 
-## Safety items still intentionally outside v0.2.0
+## Safety items still intentionally outside v0.2.1
 
 Before real charging, add and test at least:
 

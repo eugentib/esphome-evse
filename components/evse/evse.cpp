@@ -1,4 +1,5 @@
 #include "evse.h"
+#include <inttypes.h>
 
 #ifdef USE_ARDUINO
 #include <Arduino.h>
@@ -20,7 +21,7 @@ void EVSEComponent::setup() {
   pilot_adc_gpio_num_ = pilot_adc_pin_->get_pin();
   analogReadResolution(12);
 #else
-  ESP_LOGE(TAG, "v0.2.0 currently requires the Arduino framework");
+  ESP_LOGE(TAG, "v0.2.1 currently requires the Arduino framework");
   mark_failed();
   return;
 #endif
@@ -39,17 +40,17 @@ void EVSEComponent::setup() {
   candidate_since_ms_ = now;
   state_entered_ms_ = now;
 
-  ESP_LOGI(TAG, "EVSE v0.2.0 initialized; ADC=GPIO%u; enabled=OFF; available=ON", pilot_adc_gpio_num_);
+  ESP_LOGI(TAG, "EVSE v0.2.1 initialized; ADC=GPIO%u; enabled=OFF; available=ON", pilot_adc_gpio_num_);
 }
 
 void EVSEComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.2.0:");
+  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.2.1:");
   LOG_PIN("  Pilot ADC Pin: ", pilot_adc_pin_);
   ESP_LOGCONFIG(TAG, "  Max/default current: %.1f / %.1f A", max_current_, default_current_);
   ESP_LOGCONFIG(TAG, "  Allow State D charging: %s", YESNO(allow_ventilation_));
-  ESP_LOGCONFIG(TAG, "  Stable CP time: %u ms", stable_time_ms_);
-  ESP_LOGCONFIG(TAG, "  Graceful stop timeout: %u ms", graceful_stop_timeout_ms_);
-  ESP_LOGCONFIG(TAG, "  Fault retry time: %u ms", fault_retry_time_ms_);
+  ESP_LOGCONFIG(TAG, "  Stable CP time: %" PRIu32 " ms", stable_time_ms_);
+  ESP_LOGCONFIG(TAG, "  Graceful stop timeout: %" PRIu32 " ms", graceful_stop_timeout_ms_);
+  ESP_LOGCONFIG(TAG, "  Fault retry time: %" PRIu32 " ms", fault_retry_time_ms_);
   ESP_LOGCONFIG(TAG, "  A window: %u..%u", state_a_min_raw_, state_a_max_raw_);
   ESP_LOGCONFIG(TAG, "  B window: %u..%u", state_b_min_raw_, state_b_max_raw_);
   ESP_LOGCONFIG(TAG, "  C window: %u..%u", state_c_min_raw_, state_c_max_raw_);
@@ -256,7 +257,7 @@ void EVSEComponent::control_() {
     if (state_ != EvseState::E)
       enter_state_(EvseState::E);
     if ((uint32_t) (now - fault_since_ms_) >= fault_retry_time_ms_) {
-      ESP_LOGI(TAG, "Auto-clearing transient EVSE fault after %u ms", fault_retry_time_ms_);
+      ESP_LOGI(TAG, "Auto-clearing transient EVSE fault after %" PRIu32 " ms", fault_retry_time_ms_);
       clear_fault_();
     }
     return;
@@ -338,7 +339,7 @@ void EVSEComponent::enter_state_(EvseState next) {
       if (was_energizing) {
         graceful_stop_active_ = true;
         graceful_stop_started_ms_ = state_entered_ms_;
-        ESP_LOGI(TAG, "Graceful stop started; contactor held for up to %u ms", graceful_stop_timeout_ms_);
+        ESP_LOGI(TAG, "Graceful stop started; contactor held for up to %" PRIu32 " ms", graceful_stop_timeout_ms_);
       } else {
         graceful_stop_active_ = false;
         open_contactor_();
