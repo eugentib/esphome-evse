@@ -24,6 +24,7 @@ CONF_FAULT_RETRY_TIME = "fault_retry_time"
 CONF_TASK_CORE = "task_core"
 CONF_TASK_PRIORITY = "task_priority"
 CONF_TASK_STACK_SIZE = "task_stack_size"
+CONF_TIMING_DEBUG = "timing_debug"
 
 CONF_STATE_A_MIN_MV = "state_a_min_mv"
 CONF_STATE_A_MAX_MV = "state_a_max_mv"
@@ -44,6 +45,10 @@ CONF_CP_LOW_MV = "cp_low_mv"
 CONF_ADVERTISED_CURRENT = "advertised_current"
 CONF_TASK_LATE_CYCLES = "task_late_cycles"
 CONF_TASK_MAX_RUNTIME = "task_max_runtime"
+CONF_TASK_LAST_RUNTIME = "task_last_runtime"
+CONF_TASK_LAST_LATENESS = "task_last_lateness"
+CONF_TASK_MAX_LATENESS = "task_max_lateness"
+CONF_TASK_MISSED_DEADLINES = "task_missed_deadlines"
 CONF_VEHICLE_CONNECTED = "vehicle_connected"
 CONF_CHARGING = "charging"
 CONF_STOPPING = "stopping"
@@ -76,6 +81,9 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_TASK_CORE, default=1): cv.int_range(min=0, max=1),
     cv.Optional(CONF_TASK_PRIORITY, default=5): cv.int_range(min=1, max=24),
     cv.Optional(CONF_TASK_STACK_SIZE, default=4096): cv.int_range(min=3072, max=16384),
+    # Timing instrumentation is intended for development/validation.
+    # If omitted, legacy v0.4.0 timing sensors still auto-enable it.
+    cv.Optional(CONF_TIMING_DEBUG): cv.boolean,
 
     cv.Required(CONF_STATE_A_MIN_MV): mv,
     cv.Required(CONF_STATE_A_MAX_MV): mv,
@@ -101,6 +109,18 @@ CONFIG_SCHEMA = cv.Schema({
     ),
     cv.Optional(CONF_TASK_MAX_RUNTIME): sensor.sensor_schema(
         unit_of_measurement="us", accuracy_decimals=0, icon="mdi:timer-outline"
+    ),
+    cv.Optional(CONF_TASK_LAST_RUNTIME): sensor.sensor_schema(
+        unit_of_measurement="us", accuracy_decimals=0, icon="mdi:timer-outline"
+    ),
+    cv.Optional(CONF_TASK_LAST_LATENESS): sensor.sensor_schema(
+        unit_of_measurement="us", accuracy_decimals=0, icon="mdi:clock-alert-outline"
+    ),
+    cv.Optional(CONF_TASK_MAX_LATENESS): sensor.sensor_schema(
+        unit_of_measurement="us", accuracy_decimals=0, icon="mdi:clock-alert-outline"
+    ),
+    cv.Optional(CONF_TASK_MISSED_DEADLINES): sensor.sensor_schema(
+        accuracy_decimals=0, icon="mdi:timer-off-outline"
     ),
     cv.Optional(CONF_VEHICLE_CONNECTED): binary_sensor.binary_sensor_schema(),
     cv.Optional(CONF_CHARGING): binary_sensor.binary_sensor_schema(),
@@ -175,6 +195,22 @@ async def to_code(config):
     cg.add(var.set_task_priority(config[CONF_TASK_PRIORITY]))
     cg.add(var.set_task_stack_size(config[CONF_TASK_STACK_SIZE]))
 
+    timing_sensor_keys = (
+        CONF_TASK_LATE_CYCLES,
+        CONF_TASK_MAX_RUNTIME,
+        CONF_TASK_LAST_RUNTIME,
+        CONF_TASK_LAST_LATENESS,
+        CONF_TASK_MAX_LATENESS,
+        CONF_TASK_MISSED_DEADLINES,
+    )
+    if CONF_TIMING_DEBUG in config:
+        timing_debug = config[CONF_TIMING_DEBUG]
+    else:
+        # Backward compatibility: a v0.4.0 YAML that already contains
+        # task_late_cycles/task_max_runtime keeps working unchanged.
+        timing_debug = any(key in config for key in timing_sensor_keys)
+    cg.add(var.set_timing_debug(timing_debug))
+
     cg.add(var.set_state_a_min_mv(config[CONF_STATE_A_MIN_MV]))
     cg.add(var.set_state_a_max_mv(config[CONF_STATE_A_MAX_MV]))
     cg.add(var.set_state_b_min_mv(config[CONF_STATE_B_MIN_MV]))
@@ -204,12 +240,25 @@ async def to_code(config):
     if CONF_ADVERTISED_CURRENT in config:
         ent = await sensor.new_sensor(config[CONF_ADVERTISED_CURRENT])
         cg.add(var.set_advertised_current_sensor(ent))
-    if CONF_TASK_LATE_CYCLES in config:
-        ent = await sensor.new_sensor(config[CONF_TASK_LATE_CYCLES])
-        cg.add(var.set_task_late_cycles_sensor(ent))
-    if CONF_TASK_MAX_RUNTIME in config:
-        ent = await sensor.new_sensor(config[CONF_TASK_MAX_RUNTIME])
-        cg.add(var.set_task_max_runtime_sensor(ent))
+    if timing_debug:
+        if CONF_TASK_LATE_CYCLES in config:
+            ent = await sensor.new_sensor(config[CONF_TASK_LATE_CYCLES])
+            cg.add(var.set_task_late_cycles_sensor(ent))
+        if CONF_TASK_MAX_RUNTIME in config:
+            ent = await sensor.new_sensor(config[CONF_TASK_MAX_RUNTIME])
+            cg.add(var.set_task_max_runtime_sensor(ent))
+        if CONF_TASK_LAST_RUNTIME in config:
+            ent = await sensor.new_sensor(config[CONF_TASK_LAST_RUNTIME])
+            cg.add(var.set_task_last_runtime_sensor(ent))
+        if CONF_TASK_LAST_LATENESS in config:
+            ent = await sensor.new_sensor(config[CONF_TASK_LAST_LATENESS])
+            cg.add(var.set_task_last_lateness_sensor(ent))
+        if CONF_TASK_MAX_LATENESS in config:
+            ent = await sensor.new_sensor(config[CONF_TASK_MAX_LATENESS])
+            cg.add(var.set_task_max_lateness_sensor(ent))
+        if CONF_TASK_MISSED_DEADLINES in config:
+            ent = await sensor.new_sensor(config[CONF_TASK_MISSED_DEADLINES])
+            cg.add(var.set_task_missed_deadlines_sensor(ent))
     if CONF_VEHICLE_CONNECTED in config:
         ent = await binary_sensor.new_binary_sensor(config[CONF_VEHICLE_CONNECTED])
         cg.add(var.set_vehicle_connected_sensor(ent))

@@ -59,6 +59,7 @@ class EVSEComponent : public Component {
   void set_task_core(uint8_t core) { task_core_ = core; }
   void set_task_priority(uint8_t priority) { task_priority_ = priority; }
   void set_task_stack_size(uint32_t bytes) { task_stack_size_ = bytes; }
+  void set_timing_debug(bool value) { timing_debug_ = value; }
 
   void set_state_a_min_mv(uint16_t v) { state_a_min_mv_ = v; }
   void set_state_a_max_mv(uint16_t v) { state_a_max_mv_ = v; }
@@ -79,6 +80,10 @@ class EVSEComponent : public Component {
   void set_advertised_current_sensor(sensor::Sensor *s) { advertised_current_sensor_ = s; }
   void set_task_late_cycles_sensor(sensor::Sensor *s) { task_late_cycles_sensor_ = s; }
   void set_task_max_runtime_sensor(sensor::Sensor *s) { task_max_runtime_sensor_ = s; }
+  void set_task_last_runtime_sensor(sensor::Sensor *s) { task_last_runtime_sensor_ = s; }
+  void set_task_last_lateness_sensor(sensor::Sensor *s) { task_last_lateness_sensor_ = s; }
+  void set_task_max_lateness_sensor(sensor::Sensor *s) { task_max_lateness_sensor_ = s; }
+  void set_task_missed_deadlines_sensor(sensor::Sensor *s) { task_missed_deadlines_sensor_ = s; }
   void set_vehicle_connected_sensor(binary_sensor::BinarySensor *s) { vehicle_connected_sensor_ = s; }
   void set_charging_sensor(binary_sensor::BinarySensor *s) { charging_sensor_ = s; }
   void set_stopping_sensor(binary_sensor::BinarySensor *s) { stopping_sensor_ = s; }
@@ -142,6 +147,10 @@ class EVSEComponent : public Component {
   sensor::Sensor *advertised_current_sensor_{nullptr};
   sensor::Sensor *task_late_cycles_sensor_{nullptr};
   sensor::Sensor *task_max_runtime_sensor_{nullptr};
+  sensor::Sensor *task_last_runtime_sensor_{nullptr};
+  sensor::Sensor *task_last_lateness_sensor_{nullptr};
+  sensor::Sensor *task_max_lateness_sensor_{nullptr};
+  sensor::Sensor *task_missed_deadlines_sensor_{nullptr};
   binary_sensor::BinarySensor *vehicle_connected_sensor_{nullptr};
   binary_sensor::BinarySensor *charging_sensor_{nullptr};
   binary_sensor::BinarySensor *stopping_sensor_{nullptr};
@@ -164,6 +173,7 @@ class EVSEComponent : public Component {
   uint8_t task_core_{1};
   uint8_t task_priority_{5};
   uint32_t task_stack_size_{4096};
+  bool timing_debug_{false};
 
   uint16_t state_a_min_mv_{2550}, state_a_max_mv_{2745};
   uint16_t state_b_min_mv_{2260}, state_b_max_mv_{2455};
@@ -207,7 +217,11 @@ class EVSEComponent : public Component {
   uint32_t diode_invalid_since_ms_{0};
   uint32_t fault_since_ms_{0};
   uint32_t task_late_cycles_{0};
+  uint32_t task_last_runtime_us_{0};
   uint32_t task_max_runtime_us_{0};
+  uint32_t task_last_lateness_us_{0};
+  uint32_t task_max_lateness_us_{0};
+  uint32_t task_missed_deadlines_{0};
 
   // Coherent status snapshot consumed by ESPHome loop()/Home Assistant publishing.
   EvseState snapshot_state_{EvseState::A};
@@ -220,7 +234,11 @@ class EVSEComponent : public Component {
   bool snapshot_graceful_stop_{false};
   uint32_t snapshot_task_heartbeat_ms_{0};
   uint32_t snapshot_task_late_cycles_{0};
+  uint32_t snapshot_task_last_runtime_us_{0};
   uint32_t snapshot_task_max_runtime_us_{0};
+  uint32_t snapshot_task_last_lateness_us_{0};
+  uint32_t snapshot_task_max_lateness_us_{0};
+  uint32_t snapshot_task_missed_deadlines_{0};
 
   uint32_t last_publish_ms_{0};
 };

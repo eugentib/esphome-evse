@@ -96,9 +96,9 @@ evse:
   id: evse_controller
   pilot_output: cp_pwm
   pilot_adc_pin: GPIO34
-  # v0.4.0 uses ADC_11db and analogReadMilliVolts() for calibrated mV.
+  # v0.4.1 uses ADC_11db and analogReadMilliVolts() for calibrated mV.
 
-  # v0.4.0 controls the onboard relay directly from the dedicated EVSE task.
+  # v0.4.1 controls the onboard relay directly from the dedicated EVSE task.
   # On ESP32 Relay X2, relay 1 is GPIO16. It must drive only an EXTERNAL
   # contactor coil, never the EV charging current itself.
   contactor_pin: GPIO16
@@ -122,6 +122,12 @@ evse:
   task_core: 1
   task_priority: 5
   task_stack_size: 4096
+
+  # Development-only task timing instrumentation.
+  # For the final installation, change only this line to false; the
+  # sensor definitions below may remain in the YAML and will not be
+  # instantiated/published.
+  timing_debug: true
 
   # Initial calibrated windows for the CP feedback network:
   #   R9  = 470 kΩ from CP
@@ -159,10 +165,19 @@ evse:
     name: "EVSE CP Low"
   advertised_current:
     name: "EVSE Advertised Current"
+  # These entities are created only while timing_debug: true.
   task_late_cycles:
     name: "EVSE Task Late Cycles"
+  task_last_runtime:
+    name: "EVSE Task Last Runtime"
   task_max_runtime:
     name: "EVSE Task Max Runtime"
+  task_last_lateness:
+    name: "EVSE Task Last Lateness"
+  task_max_lateness:
+    name: "EVSE Task Max Lateness"
+  task_missed_deadlines:
+    name: "EVSE Task Missed Deadlines"
   vehicle_connected:
     name: "EVSE Vehicle Connected"
   charging:

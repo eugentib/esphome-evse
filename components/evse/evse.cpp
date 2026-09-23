@@ -11,12 +11,12 @@ static const char *const TAG = "evse";
 
 void EVSEComponent::setup() {
 #ifndef USE_ESP32
-  ESP_LOGE(TAG, "v0.4.0 requires ESP32");
+  ESP_LOGE(TAG, "v0.4.1 requires ESP32");
   mark_failed();
   return;
 #else
 #ifndef USE_ARDUINO
-  ESP_LOGE(TAG, "v0.4.0 currently requires the Arduino framework");
+  ESP_LOGE(TAG, "v0.4.1 currently requires the Arduino framework");
   mark_failed();
   return;
 #else
@@ -68,7 +68,7 @@ void EVSEComponent::setup() {
 
   ESP_LOGI(
       TAG,
-      "EVSE v0.4.0 initialized; ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
+      "EVSE v0.4.1 initialized; ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
       pilot_adc_gpio_num_,
       task_core_,
       task_priority_,
@@ -79,12 +79,13 @@ void EVSEComponent::setup() {
 }
 
 void EVSEComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.0:");
+  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.1:");
   LOG_PIN("  Pilot ADC Pin: ", pilot_adc_pin_);
   LOG_PIN("  Contactor Pin: ", contactor_pin_);
   ESP_LOGCONFIG(TAG, "  Max/default current: %.1f / %.1f A", max_current_, default_current_);
   ESP_LOGCONFIG(TAG, "  Allow State D charging: %s", YESNO(allow_ventilation_));
   ESP_LOGCONFIG(TAG, "  EVSE task: core=%u priority=%u stack=%" PRIu32 " B", task_core_, task_priority_, task_stack_size_);
+  ESP_LOGCONFIG(TAG, "  Timing debug: %s", YESNO(timing_debug_));
   ESP_LOGCONFIG(TAG, "  Task/sample interval: %" PRIu32 " ms", sample_interval_ms_);
   ESP_LOGCONFIG(TAG, "  ADC sample window: %" PRIu32 " us", sample_window_us_);
   ESP_LOGCONFIG(TAG, "  Stable CP time: %" PRIu32 " ms", stable_time_ms_);
@@ -209,19 +210,29 @@ void EVSEComponent::task_loop_() {
   if (period_ticks < 1)
     period_ticks = 1;
 
+  const uint32_t period_us = sample_interval_ms_ * 1000UL;
+  static constexpr uint32_t LATE_THRESHOLD_US = 1000UL;
+
+  // Only used when timing_debug_ is enabled. Unsigned micros() arithmetic is
+  // intentionally used so the normal ~71 minute micros() wrap is harmless.
+  uint32_t expected_start_us = timing_debug_ ? micros() : 0;
   bool first_cycle = true;
 
   for (;;) {
-    const TickType_t actual_start_tick = xTaskGetTickCount();
-    bool late_cycle = false;
-    if (!first_cycle) {
-      const int32_t lateness_ticks = static_cast<int32_t>(actual_start_tick - last_wake);
-      if (lateness_ticks > 1)
-        late_cycle = true;
-    }
-    first_cycle = false;
+    uint32_t cycle_start_us = 0;
+    uint32_t lateness_us = 0;
 
-    const uint32_t cycle_start_us = micros();
+    if (timing_debug_) {
+      cycle_start_us = micros();
+
+      if (!first_cycle) {
+        const int32_t delta_us = static_cast<int32_t>(cycle_start_us - expected_start_us);
+        if (delta_us > 0)
+          lateness_us = static_cast<uint32_t>(delta_us);
+      }
+    }
+
+    first_cycle = false;
     const uint32_t now = millis();
 
     process_requests_();
@@ -230,16 +241,31 @@ void EVSEComponent::task_loop_() {
     update_diode_supervision_(now);
     control_(now);
 
-    const uint32_t runtime_us = (uint32_t) (micros() - cycle_start_us);
-    if (runtime_us > task_max_runtime_us_)
-      task_max_runtime_us_ = runtime_us;
-    if (runtime_us > sample_interval_ms_ * 1000UL)
-      late_cycle = true;
-    if (late_cycle)
-      task_late_cycles_++;
+    if (timing_debug_) {
+      const uint32_t runtime_us = static_cast<uint32_t>(micros() - cycle_start_us);
+
+      task_last_runtime_us_ = runtime_us;
+      task_last_lateness_us_ = lateness_us;
+
+      if (runtime_us > task_max_runtime_us_)
+        task_max_runtime_us_ = runtime_us;
+      if (lateness_us > task_max_lateness_us_)
+        task_max_lateness_us_ = lateness_us;
+
+      // "Late cycle" means the task started more than 1 ms after its nominal
+      // release time. Runtime overruns are reported separately as deadlines.
+      if (lateness_us > LATE_THRESHOLD_US)
+        task_late_cycles_++;
+
+      // A deadline is missed when this cycle completes at/after the next
+      // nominal release point, whether due to late start, long runtime, or both.
+      if (lateness_us + runtime_us >= period_us)
+        task_missed_deadlines_++;
+
+      expected_start_us += period_us;
+    }
 
     update_snapshot_(now);
-
     vTaskDelayUntil(&last_wake, period_ticks);
   }
 }
@@ -677,7 +703,11 @@ void EVSEComponent::update_snapshot_(uint32_t heartbeat_ms) {
   snapshot_graceful_stop_ = graceful_stop_active_;
   snapshot_task_heartbeat_ms_ = heartbeat_ms;
   snapshot_task_late_cycles_ = task_late_cycles_;
+  snapshot_task_last_runtime_us_ = task_last_runtime_us_;
   snapshot_task_max_runtime_us_ = task_max_runtime_us_;
+  snapshot_task_last_lateness_us_ = task_last_lateness_us_;
+  snapshot_task_max_lateness_us_ = task_max_lateness_us_;
+  snapshot_task_missed_deadlines_ = task_missed_deadlines_;
 #ifdef USE_ESP32
   portEXIT_CRITICAL(&data_mux_);
 #endif
@@ -694,7 +724,11 @@ void EVSEComponent::publish_() {
   bool graceful_stop;
   uint32_t heartbeat_ms;
   uint32_t late_cycles;
+  uint32_t last_runtime_us;
   uint32_t max_runtime_us;
+  uint32_t last_lateness_us;
+  uint32_t max_lateness_us;
+  uint32_t missed_deadlines;
 
 #ifdef USE_ESP32
   portENTER_CRITICAL(&data_mux_);
@@ -709,7 +743,11 @@ void EVSEComponent::publish_() {
   graceful_stop = snapshot_graceful_stop_;
   heartbeat_ms = snapshot_task_heartbeat_ms_;
   late_cycles = snapshot_task_late_cycles_;
+  last_runtime_us = snapshot_task_last_runtime_us_;
   max_runtime_us = snapshot_task_max_runtime_us_;
+  last_lateness_us = snapshot_task_last_lateness_us_;
+  max_lateness_us = snapshot_task_max_lateness_us_;
+  missed_deadlines = snapshot_task_missed_deadlines_;
 #ifdef USE_ESP32
   portEXIT_CRITICAL(&data_mux_);
 #endif
@@ -730,6 +768,14 @@ void EVSEComponent::publish_() {
     task_late_cycles_sensor_->publish_state(late_cycles);
   if (task_max_runtime_sensor_ != nullptr)
     task_max_runtime_sensor_->publish_state(max_runtime_us);
+  if (task_last_runtime_sensor_ != nullptr)
+    task_last_runtime_sensor_->publish_state(last_runtime_us);
+  if (task_last_lateness_sensor_ != nullptr)
+    task_last_lateness_sensor_->publish_state(last_lateness_us);
+  if (task_max_lateness_sensor_ != nullptr)
+    task_max_lateness_sensor_->publish_state(max_lateness_us);
+  if (task_missed_deadlines_sensor_ != nullptr)
+    task_missed_deadlines_sensor_->publish_state(missed_deadlines);
 
   const bool connected = state == EvseState::B1 || state == EvseState::B2 ||
                          state == EvseState::C1 || state == EvseState::C2 ||

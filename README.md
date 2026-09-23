@@ -2,12 +2,56 @@
 
 Experimental IEC 61851 / SAE J1772 basic-signaling EVSE controller implemented as an ESPHome external component.
 
-**Current version: v0.4.0**  
+**Current version: v0.4.1**  
 **Target:** classic dual-core ESP32 / ESP32 Relay X2, single phase, fixed Type 2 cable.
 
 > Experimental DIY EVSE firmware. It is not a certified safety controller. Mains protection, residual-current protection, PE integrity, contactor supervision, thermal protection and the analog CP interface remain hardware responsibilities and must be engineered/tested independently.
 
-## v0.4.0 highlights
+## v0.4.1 timing diagnostics
+
+v0.4.1 adds optional timing instrumentation for the dedicated EVSE task. It is controlled by one flag:
+
+```yaml
+timing_debug: true
+```
+
+With the flag enabled, the example exposes:
+
+```yaml
+task_late_cycles:
+  name: "EVSE Task Late Cycles"
+task_last_runtime:
+  name: "EVSE Task Last Runtime"
+task_max_runtime:
+  name: "EVSE Task Max Runtime"
+task_last_lateness:
+  name: "EVSE Task Last Lateness"
+task_max_lateness:
+  name: "EVSE Task Max Lateness"
+task_missed_deadlines:
+  name: "EVSE Task Missed Deadlines"
+```
+
+For production, change only:
+
+```yaml
+timing_debug: false
+```
+
+The timing sensor definitions may remain in YAML; the component will not instantiate or publish them.
+
+Definitions:
+
+- **Late Cycles**: cycle started more than 1 ms after its nominal release time.
+- **Last/Max Runtime**: execution time of the EVSE control cycle.
+- **Last/Max Lateness**: positive delay between nominal and actual task start.
+- **Missed Deadlines**: cycle finished at or after the next nominal 20 ms release point.
+
+`EVSE Task Running` remains independent of `timing_debug`, because it is a useful operational health signal rather than development instrumentation.
+
+If `timing_debug` is omitted, v0.4.1 keeps backward compatibility with v0.4.0: the presence of the old `task_late_cycles` or `task_max_runtime` entities automatically enables timing instrumentation.
+
+## v0.4.0 calibrated CP measurement
 
 v0.4.0 changes CP measurement from uncalibrated 12-bit ADC counts to calibrated millivolts:
 
@@ -86,11 +130,11 @@ external_components:
     refresh: 1min
 ```
 
-After tagging v0.4.0:
+After tagging v0.4.1:
 
 ```yaml
 external_components:
-  - source: github://eugentib/esphome-evse@v0.4.0
+  - source: github://eugentib/esphome-evse@v0.4.1
     components: [evse]
     refresh: never
 ```
@@ -135,7 +179,7 @@ The EVSE control path remains in its own pinned FreeRTOS task.
 
 ## CP feedback hardware
 
-The v0.4.0 defaults assume:
+The v0.4.x defaults assume:
 
 ```text
 CP ---- 470k ----+
@@ -151,7 +195,7 @@ Use correctly oriented rail clamps at the ADC pin. The ESP32 pin must never be e
 
 Because the offset is derived from the board's 3.3 V rail and resistor tolerances are finite, final bench verification remains required even though the ESP32 ADC conversion itself is calibrated to millivolts.
 
-## Safety items still outside v0.4.0
+## Safety items still outside v0.4.1
 
 Before real charging, add and test at least:
 

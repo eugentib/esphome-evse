@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.1
+
+- Add `timing_debug` switch for development-only EVSE task instrumentation.
+- Add Task Last Runtime, Last Lateness, Max Lateness and Missed Deadlines sensors.
+- Define Late Cycles as task starts more than 1 ms after nominal release.
+- Define Missed Deadlines as cycles that complete at/after the next nominal release.
+- Keep `EVSE Task Running` outside timing debug as an operational health signal.
+- Preserve v0.4.0 YAML compatibility: existing timing sensors auto-enable instrumentation when `timing_debug` is omitted.
+- When `timing_debug: false`, timing sensor definitions may remain in YAML without being instantiated.
+
 ## v0.4.0
 
 - Switch CP state thresholds from raw ADC counts to calibrated millivolts.
