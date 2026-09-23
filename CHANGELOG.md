@@ -1,28 +1,34 @@
 # Changelog
 
+## v0.4.0
+
+- Switch CP state thresholds from raw ADC counts to calibrated millivolts.
+- Configure CP ADC explicitly for `ADC_11db`.
+- Use `analogReadMilliVolts()` in the dedicated EVSE task.
+- Rename CP telemetry to `cp_high_mv` / `cp_low_mv`.
+- Add initial mV windows for R9=470k, R10=100k, R11=100k feedback network.
+- Increase default CP acquisition window to 3000 us.
+- Keep the dedicated FreeRTOS task and passive Bluetooth proxy architecture from v0.3.0.
+
+## v0.3.0
+
+- Move CP sampling, diode supervision and EVSE state machine into a dedicated FreeRTOS task.
+- Pin EVSE task to a configurable ESP32 core (default Core 1).
+- Add configurable task priority and stack size.
+- Use `vTaskDelayUntil()` for periodic scheduling.
+- Change contactor interface from an ESPHome `switch` to direct `contactor_pin` GPIO control.
+- Keep ESPHome `loop()` limited to Home Assistant/entity publication.
+- Add thread-safe request/status handoff between ESPHome and EVSE task.
+- Add `EVSE Task Running`, `EVSE Task Late Cycles`, and `EVSE Task Max Runtime` diagnostics.
+- Add passive/adverts-only Bluetooth proxy to ESP32 Relay X2 example.
+- Keep CP ADC on ADC1/GPIO34.
+- Document current State-E electrical-output limitation of the one-bit CP driver.
+
 ## v0.2.1
 
-- Fix portable logging format for uint32_t timing values (PRIu32).
-- No EVSE state-machine behavior changes from v0.2.0.
+- Fix portable `uint32_t` log formatting.
 
 ## v0.2.0
 
-- Reworked state machine around IEC 61851 / J1772 A/B1/B2/C1/C2/D1/D2/E/F semantics.
-- Added graceful stop C2/D2 -> C1/D1 with 6 s timeout.
-- Added State F (`Available = OFF`) with steady negative pilot.
-- Added State E output for pilot/diode faults.
-- Added explicit A/B/C/D ADC windows with invalid gaps.
-- Added bounded negative-half-cycle diode window and debounce time.
-- Added transient fault auto-retry and manual reset action.
-- Added optional State D charging gate (`allow_ventilation`, false by default).
-- Added physical CP state, fault reason and graceful-stop Home Assistant entities.
-- Added separate CI example using the local external component.
-
-## v0.1.1
-
-- Accepted normal ESPHome GPIO syntax for `pilot_adc_pin`.
-- Added B1/B2 reporting.
-
-## v0.1.0
-
-Initial experimental release.
+- Add explicit A/B1/B2/C1/C2/D1/D2/E/F state machine.
+- Add CP voltage windows, diode window and graceful stop.

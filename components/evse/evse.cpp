@@ -1,5 +1,4 @@
 #include "evse.h"
-#include <inttypes.h>
 
 #ifdef USE_ARDUINO
 #include <Arduino.h>
@@ -11,101 +10,165 @@ namespace evse {
 static const char *const TAG = "evse";
 
 void EVSEComponent::setup() {
-#ifdef USE_ARDUINO
-  if (pilot_adc_pin_ == nullptr) {
-    ESP_LOGE(TAG, "Pilot ADC pin is not configured");
+#ifndef USE_ESP32
+  ESP_LOGE(TAG, "v0.4.0 requires ESP32");
+  mark_failed();
+  return;
+#else
+#ifndef USE_ARDUINO
+  ESP_LOGE(TAG, "v0.4.0 currently requires the Arduino framework");
+  mark_failed();
+  return;
+#else
+  if (pilot_adc_pin_ == nullptr || contactor_pin_ == nullptr || pilot_output_ == nullptr) {
+    ESP_LOGE(TAG, "Pilot ADC, contactor pin and pilot output must all be configured");
     mark_failed();
     return;
   }
+
   pilot_adc_pin_->setup();
   pilot_adc_gpio_num_ = pilot_adc_pin_->get_pin();
   analogReadResolution(12);
-#else
-  ESP_LOGE(TAG, "v0.2.1 currently requires the Arduino framework");
-  mark_failed();
-  return;
-#endif
+  analogSetPinAttenuation(pilot_adc_gpio_num_, ADC_11db);
+
+  contactor_pin_->setup();
+  contactor_pin_->digital_write(false);
+  contactor_on_ = false;
 
   enabled_ = false;
   available_ = true;
+  current_limit_ = default_current_;
   state_ = EvseState::A;
   fault_code_ = FaultCode::NONE;
-  fault_reason_ = "None";
   graceful_stop_active_ = false;
-
-  open_contactor_();
-  set_pilot_mode_(PilotMode::POSITIVE_DC);
+  pilot_mode_ = PilotMode::POSITIVE_DC;
+  apply_pilot_output_();
 
   const uint32_t now = millis();
   candidate_since_ms_ = now;
   state_entered_ms_ = now;
+  update_snapshot_(now);
 
-  ESP_LOGI(TAG, "EVSE v0.2.1 initialized; ADC=GPIO%u; enabled=OFF; available=ON", pilot_adc_gpio_num_);
+  const BaseType_t rc = xTaskCreatePinnedToCore(
+      &EVSEComponent::task_entry_,
+      "evse_ctrl",
+      task_stack_size_,
+      this,
+      task_priority_,
+      &task_handle_,
+      task_core_
+  );
+
+  if (rc != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create EVSE FreeRTOS task");
+    contactor_pin_->digital_write(false);
+    mark_failed();
+    return;
+  }
+
+  ESP_LOGI(
+      TAG,
+      "EVSE v0.4.0 initialized; ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
+      pilot_adc_gpio_num_,
+      task_core_,
+      task_priority_,
+      task_stack_size_
+  );
+#endif
+#endif
 }
 
 void EVSEComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.2.1:");
+  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.0:");
   LOG_PIN("  Pilot ADC Pin: ", pilot_adc_pin_);
+  LOG_PIN("  Contactor Pin: ", contactor_pin_);
   ESP_LOGCONFIG(TAG, "  Max/default current: %.1f / %.1f A", max_current_, default_current_);
   ESP_LOGCONFIG(TAG, "  Allow State D charging: %s", YESNO(allow_ventilation_));
+  ESP_LOGCONFIG(TAG, "  EVSE task: core=%u priority=%u stack=%" PRIu32 " B", task_core_, task_priority_, task_stack_size_);
+  ESP_LOGCONFIG(TAG, "  Task/sample interval: %" PRIu32 " ms", sample_interval_ms_);
+  ESP_LOGCONFIG(TAG, "  ADC sample window: %" PRIu32 " us", sample_window_us_);
   ESP_LOGCONFIG(TAG, "  Stable CP time: %" PRIu32 " ms", stable_time_ms_);
   ESP_LOGCONFIG(TAG, "  Graceful stop timeout: %" PRIu32 " ms", graceful_stop_timeout_ms_);
   ESP_LOGCONFIG(TAG, "  Fault retry time: %" PRIu32 " ms", fault_retry_time_ms_);
-  ESP_LOGCONFIG(TAG, "  A window: %u..%u", state_a_min_raw_, state_a_max_raw_);
-  ESP_LOGCONFIG(TAG, "  B window: %u..%u", state_b_min_raw_, state_b_max_raw_);
-  ESP_LOGCONFIG(TAG, "  C window: %u..%u", state_c_min_raw_, state_c_max_raw_);
-  ESP_LOGCONFIG(TAG, "  D window: %u..%u", state_d_min_raw_, state_d_max_raw_);
-  ESP_LOGCONFIG(TAG, "  -12 V diode window: %u..%u", diode_min_raw_, diode_max_raw_);
+  ESP_LOGCONFIG(TAG, "  A window: %u..%u mV", state_a_min_mv_, state_a_max_mv_);
+  ESP_LOGCONFIG(TAG, "  B window: %u..%u mV", state_b_min_mv_, state_b_max_mv_);
+  ESP_LOGCONFIG(TAG, "  C window: %u..%u mV", state_c_min_mv_, state_c_max_mv_);
+  ESP_LOGCONFIG(TAG, "  D window: %u..%u mV", state_d_min_mv_, state_d_max_mv_);
+  ESP_LOGCONFIG(TAG, "  -12 V diode window: %u..%u mV", diode_min_mv_, diode_max_mv_);
 }
 
 void EVSEComponent::loop() {
   const uint32_t now = millis();
-
-  if ((uint32_t) (now - last_sample_ms_) >= sample_interval_ms_) {
-    last_sample_ms_ = now;
-    sample_cp_();
-    update_stable_cp_(sampled_cp_);
-    update_diode_supervision_(now);
-    control_();
-  }
-
   if ((uint32_t) (now - last_publish_ms_) >= 500) {
     last_publish_ms_ = now;
     publish_();
   }
 }
 
+void EVSEComponent::on_shutdown() {
+#ifdef USE_ESP32
+  if (task_handle_ != nullptr)
+    vTaskSuspend(task_handle_);
+#endif
+  if (contactor_pin_ != nullptr)
+    contactor_pin_->digital_write(false);
+  if (pilot_output_ != nullptr)
+    pilot_output_->set_level(0.0f);  // external CP driver -> -12 V fail-safe
+}
+
 void EVSEComponent::set_enabled(bool enabled) {
-  enabled_ = enabled;
-  ESP_LOGI(TAG, "EVSE enabled = %s", YESNO(enabled));
-  // Do not open the contactor here. If charging is active, control_() moves
-  // C2/D2 -> C1/D1 and performs the IEC-style graceful stop sequence.
+#ifdef USE_ESP32
+  portENTER_CRITICAL(&data_mux_);
+  requested_enabled_ = enabled;
+  portEXIT_CRITICAL(&data_mux_);
+#else
+  requested_enabled_ = enabled;
+#endif
+  ESP_LOGI(TAG, "EVSE enable request = %s", YESNO(enabled));
+}
+
+bool EVSEComponent::is_enabled() {
+#ifdef USE_ESP32
+  portENTER_CRITICAL(&data_mux_);
+  const bool value = requested_enabled_;
+  portEXIT_CRITICAL(&data_mux_);
+  return value;
+#else
+  return requested_enabled_;
+#endif
 }
 
 void EVSEComponent::set_available(bool available) {
-  if (available_ == available)
-    return;
+#ifdef USE_ESP32
+  portENTER_CRITICAL(&data_mux_);
+  requested_available_ = available;
+  portEXIT_CRITICAL(&data_mux_);
+#else
+  requested_available_ = available;
+#endif
+  ESP_LOGI(TAG, "EVSE availability request = %s", YESNO(available));
+}
 
-  available_ = available;
-  ESP_LOGI(TAG, "EVSE available = %s", YESNO(available));
-
-  if (!available_) {
-    if (fault_code_ == FaultCode::NONE)
-      enter_state_(EvseState::F);
-  } else if (fault_code_ == FaultCode::NONE) {
-    // Re-enter service from State A. Fresh CP samples will then move to B/C.
-    stable_cp_ = CpLevel::UNKNOWN;
-    candidate_cp_ = CpLevel::UNKNOWN;
-    enter_state_(EvseState::A);
-  }
+bool EVSEComponent::is_available() {
+#ifdef USE_ESP32
+  portENTER_CRITICAL(&data_mux_);
+  const bool value = requested_available_;
+  portEXIT_CRITICAL(&data_mux_);
+  return value;
+#else
+  return requested_available_;
+#endif
 }
 
 void EVSEComponent::reset_fault() {
-  if (fault_code_ == FaultCode::NONE)
-    return;
-
-  ESP_LOGI(TAG, "Manual fault reset");
-  clear_fault_();
+#ifdef USE_ESP32
+  portENTER_CRITICAL(&data_mux_);
+  reset_fault_requested_ = true;
+  portEXIT_CRITICAL(&data_mux_);
+#else
+  reset_fault_requested_ = true;
+#endif
+  ESP_LOGI(TAG, "EVSE fault reset requested");
 }
 
 void EVSEComponent::set_current_limit(float amps) {
@@ -114,16 +177,120 @@ void EVSEComponent::set_current_limit(float amps) {
   if (amps > max_current_)
     amps = max_current_;
 
-  current_limit_ = amps;
-  ESP_LOGI(TAG, "Current limit = %.1f A", current_limit_);
+#ifdef USE_ESP32
+  portENTER_CRITICAL(&data_mux_);
+  requested_current_limit_ = amps;
+  portEXIT_CRITICAL(&data_mux_);
+#else
+  requested_current_limit_ = amps;
+#endif
+  ESP_LOGI(TAG, "EVSE current limit request = %.1f A", amps);
+}
 
-  if (pilot_mode_ == PilotMode::PWM)
-    apply_pilot_output_();
+float EVSEComponent::get_current_limit() {
+#ifdef USE_ESP32
+  portENTER_CRITICAL(&data_mux_);
+  const float value = requested_current_limit_;
+  portEXIT_CRITICAL(&data_mux_);
+  return value;
+#else
+  return requested_current_limit_;
+#endif
+}
+
+#ifdef USE_ESP32
+void EVSEComponent::task_entry_(void *arg) {
+  static_cast<EVSEComponent *>(arg)->task_loop_();
+}
+
+void EVSEComponent::task_loop_() {
+  TickType_t last_wake = xTaskGetTickCount();
+  TickType_t period_ticks = pdMS_TO_TICKS(sample_interval_ms_);
+  if (period_ticks < 1)
+    period_ticks = 1;
+
+  bool first_cycle = true;
+
+  for (;;) {
+    const TickType_t actual_start_tick = xTaskGetTickCount();
+    bool late_cycle = false;
+    if (!first_cycle) {
+      const int32_t lateness_ticks = static_cast<int32_t>(actual_start_tick - last_wake);
+      if (lateness_ticks > 1)
+        late_cycle = true;
+    }
+    first_cycle = false;
+
+    const uint32_t cycle_start_us = micros();
+    const uint32_t now = millis();
+
+    process_requests_();
+    sample_cp_();
+    update_stable_cp_(sampled_cp_, now);
+    update_diode_supervision_(now);
+    control_(now);
+
+    const uint32_t runtime_us = (uint32_t) (micros() - cycle_start_us);
+    if (runtime_us > task_max_runtime_us_)
+      task_max_runtime_us_ = runtime_us;
+    if (runtime_us > sample_interval_ms_ * 1000UL)
+      late_cycle = true;
+    if (late_cycle)
+      task_late_cycles_++;
+
+    update_snapshot_(now);
+
+    vTaskDelayUntil(&last_wake, period_ticks);
+  }
+}
+#endif
+
+void EVSEComponent::process_requests_() {
+  bool req_enabled;
+  bool req_available;
+  bool req_reset;
+  float req_current;
+
+#ifdef USE_ESP32
+  portENTER_CRITICAL(&data_mux_);
+  req_enabled = requested_enabled_;
+  req_available = requested_available_;
+  req_reset = reset_fault_requested_;
+  reset_fault_requested_ = false;
+  req_current = requested_current_limit_;
+  portEXIT_CRITICAL(&data_mux_);
+#else
+  req_enabled = requested_enabled_;
+  req_available = requested_available_;
+  req_reset = reset_fault_requested_;
+  reset_fault_requested_ = false;
+  req_current = requested_current_limit_;
+#endif
+
+  if (enabled_ != req_enabled) {
+    enabled_ = req_enabled;
+    ESP_LOGI(TAG, "EVSE enabled = %s", YESNO(enabled_));
+  }
+
+  if (available_ != req_available) {
+    available_ = req_available;
+    ESP_LOGI(TAG, "EVSE available = %s", YESNO(available_));
+  }
+
+  if (current_limit_ != req_current) {
+    current_limit_ = req_current;
+    ESP_LOGI(TAG, "Applied current limit = %.1f A", current_limit_);
+    if (pilot_mode_ == PilotMode::PWM)
+      apply_pilot_output_();
+  }
+
+  if (req_reset && fault_code_ != FaultCode::NONE) {
+    ESP_LOGI(TAG, "Manual fault reset");
+    clear_fault_(millis());
+  }
 }
 
 float EVSEComponent::duty_for_current_(float amps) const {
-  // IEC 61851 basic AC range used by this project: 6..32 A.
-  // I(A) = duty(%) * 0.6 for 10%..85% duty.
   float duty_percent = amps / 0.6f;
   if (duty_percent < 10.0f)
     duty_percent = 10.0f;
@@ -132,48 +299,51 @@ float EVSEComponent::duty_for_current_(float amps) const {
   return duty_percent / 100.0f;
 }
 
-bool EVSEComponent::raw_in_window_(uint16_t v, uint16_t lo, uint16_t hi) const {
+bool EVSEComponent::mv_in_window_(uint16_t v, uint16_t lo, uint16_t hi) const {
   return v >= lo && v <= hi;
 }
 
 void EVSEComponent::sample_cp_() {
 #ifdef USE_ARDUINO
-  uint16_t low = 4095;
-  uint16_t high = 0;
+  uint32_t low_mv = UINT32_MAX;
+  uint32_t high_mv = 0;
   const uint32_t start = micros();
 
-  // >1 ms captures at least one complete 1 kHz CP period.
+  // analogReadMilliVolts() uses the Arduino-ESP32 calibrated one-shot ADC
+  // conversion. The window is deliberately > 2 CP periods so the 10% positive
+  // pulse at the 6 A minimum current is sampled reliably.
   while ((uint32_t) (micros() - start) < sample_window_us_) {
-    const int sample = analogRead(pilot_adc_gpio_num_);
-    if (sample < low)
-      low = sample;
-    if (sample > high)
-      high = sample;
+    const uint32_t sample_mv = analogReadMilliVolts(pilot_adc_gpio_num_);
+    if (sample_mv < low_mv)
+      low_mv = sample_mv;
+    if (sample_mv > high_mv)
+      high_mv = sample_mv;
   }
 
-  cp_high_raw_ = high;
-  cp_low_raw_ = low;
-  sampled_cp_ = classify_cp_(high);
+  if (low_mv == UINT32_MAX)
+    low_mv = 0;
+
+  cp_high_mv_ = static_cast<uint16_t>(high_mv > 65535U ? 65535U : high_mv);
+  cp_low_mv_ = static_cast<uint16_t>(low_mv > 65535U ? 65535U : low_mv);
+  sampled_cp_ = classify_cp_(cp_high_mv_);
   diode_sample_valid_ =
-      pilot_mode_ != PilotMode::PWM || raw_in_window_(low, diode_min_raw_, diode_max_raw_);
+      pilot_mode_ != PilotMode::PWM || mv_in_window_(cp_low_mv_, diode_min_mv_, diode_max_mv_);
 #endif
 }
 
-CpLevel EVSEComponent::classify_cp_(uint16_t high_raw) const {
-  if (raw_in_window_(high_raw, state_a_min_raw_, state_a_max_raw_))
+CpLevel EVSEComponent::classify_cp_(uint16_t high_mv) const {
+  if (mv_in_window_(high_mv, state_a_min_mv_, state_a_max_mv_))
     return CpLevel::A;
-  if (raw_in_window_(high_raw, state_b_min_raw_, state_b_max_raw_))
+  if (mv_in_window_(high_mv, state_b_min_mv_, state_b_max_mv_))
     return CpLevel::B;
-  if (raw_in_window_(high_raw, state_c_min_raw_, state_c_max_raw_))
+  if (mv_in_window_(high_mv, state_c_min_mv_, state_c_max_mv_))
     return CpLevel::C;
-  if (raw_in_window_(high_raw, state_d_min_raw_, state_d_max_raw_))
+  if (mv_in_window_(high_mv, state_d_min_mv_, state_d_max_mv_))
     return CpLevel::D;
   return CpLevel::INVALID;
 }
 
-void EVSEComponent::update_stable_cp_(CpLevel sampled) {
-  const uint32_t now = millis();
-
+void EVSEComponent::update_stable_cp_(CpLevel sampled, uint32_t now) {
   if (sampled != candidate_cp_) {
     candidate_cp_ = sampled;
     candidate_since_ms_ = now;
@@ -182,7 +352,7 @@ void EVSEComponent::update_stable_cp_(CpLevel sampled) {
 
   if (sampled != stable_cp_ && (uint32_t) (now - candidate_since_ms_) >= stable_time_ms_) {
     stable_cp_ = sampled;
-    ESP_LOGI(TAG, "Stable CP -> %s (high=%u low=%u)", cp_level_to_string_(stable_cp_), cp_high_raw_, cp_low_raw_);
+    ESP_LOGI(TAG, "Stable CP -> %s (high=%u mV low=%u mV)", cp_level_to_string_(stable_cp_), cp_high_mv_, cp_low_mv_);
   }
 }
 
@@ -205,9 +375,8 @@ void EVSEComponent::update_diode_supervision_(uint32_t now) {
     return;
   }
 
-  if ((uint32_t) (now - diode_invalid_since_ms_) >= diode_fault_time_ms_) {
-    raise_fault_(FaultCode::DIODE_FAULT, "CP diode check failed");
-  }
+  if ((uint32_t) (now - diode_invalid_since_ms_) >= diode_fault_time_ms_)
+    raise_fault_(FaultCode::DIODE_FAULT);
 }
 
 EvseState EVSEComponent::target_state_for_cp_(CpLevel cp, bool charging_allowed) {
@@ -222,7 +391,6 @@ EvseState EVSEComponent::target_state_for_cp_(CpLevel cp, bool charging_allowed)
       if (cp == CpLevel::A) return EvseState::A;
       if (cp == CpLevel::B) return charging_allowed ? EvseState::B2 : EvseState::B1;
       if (cp == CpLevel::C) return charging_allowed ? EvseState::C2 : EvseState::C1;
-      // A direct B -> D transition is considered invalid.
       break;
 
     case EvseState::C1:
@@ -243,29 +411,34 @@ EvseState EVSEComponent::target_state_for_cp_(CpLevel cp, bool charging_allowed)
 
     case EvseState::E:
     case EvseState::F:
-      // E/F are handled before this transition table.
       return state_;
   }
 
-  return EvseState::E;  // Sentinel: caller raises PILOT_FAULT.
+  return EvseState::E;
 }
 
-void EVSEComponent::control_() {
-  const uint32_t now = millis();
-
+void EVSEComponent::control_(uint32_t now) {
   if (fault_code_ != FaultCode::NONE) {
     if (state_ != EvseState::E)
-      enter_state_(EvseState::E);
+      enter_state_(EvseState::E, now);
+
     if ((uint32_t) (now - fault_since_ms_) >= fault_retry_time_ms_) {
       ESP_LOGI(TAG, "Auto-clearing transient EVSE fault after %" PRIu32 " ms", fault_retry_time_ms_);
-      clear_fault_();
+      clear_fault_(now);
     }
     return;
   }
 
   if (!available_) {
     if (state_ != EvseState::F)
-      enter_state_(EvseState::F);
+      enter_state_(EvseState::F, now);
+    return;
+  }
+
+  if (state_ == EvseState::F) {
+    stable_cp_ = CpLevel::UNKNOWN;
+    candidate_cp_ = CpLevel::UNKNOWN;
+    enter_state_(EvseState::A, now);
     return;
   }
 
@@ -275,20 +448,18 @@ void EVSEComponent::control_() {
   }
 
   if (stable_cp_ == CpLevel::INVALID) {
-    raise_fault_(FaultCode::PILOT_FAULT, "CP voltage outside valid A/B/C/D windows");
+    raise_fault_(FaultCode::PILOT_VOLTAGE);
     return;
   }
 
-  const bool charging_allowed = enabled_;
-  const EvseState target = target_state_for_cp_(stable_cp_, charging_allowed);
-
+  const EvseState target = target_state_for_cp_(stable_cp_, enabled_);
   if (target == EvseState::E) {
-    raise_fault_(FaultCode::PILOT_FAULT, "Invalid CP transition for current EVSE state");
+    raise_fault_(FaultCode::PILOT_TRANSITION);
     return;
   }
 
   if (target != state_)
-    enter_state_(target);
+    enter_state_(target, now);
 
   service_state_actions_(now);
 }
@@ -301,14 +472,14 @@ bool EVSEComponent::is_paused_active_state_(EvseState s) const {
   return s == EvseState::C1 || s == EvseState::D1;
 }
 
-void EVSEComponent::enter_state_(EvseState next) {
+void EVSEComponent::enter_state_(EvseState next, uint32_t now) {
   if (next == state_)
     return;
 
   const EvseState previous = state_;
   const bool was_energizing = is_energizing_state_(previous) && contactor_on_;
   state_ = next;
-  state_entered_ms_ = millis();
+  state_entered_ms_ = now;
 
   ESP_LOGI(TAG, "EVSE state: %s -> %s", state_to_string_(previous), state_to_string_(next));
 
@@ -333,12 +504,10 @@ void EVSEComponent::enter_state_(EvseState next) {
 
     case EvseState::C1:
     case EvseState::D1:
-      // Pause charging by suppressing PWM first. If we came from an energized
-      // C2/D2 state, keep the contactor closed while the EV winds current down.
       set_pilot_mode_(PilotMode::POSITIVE_DC);
       if (was_energizing) {
         graceful_stop_active_ = true;
-        graceful_stop_started_ms_ = state_entered_ms_;
+        graceful_stop_started_ms_ = now;
         ESP_LOGI(TAG, "Graceful stop started; contactor held for up to %" PRIu32 " ms", graceful_stop_timeout_ms_);
       } else {
         graceful_stop_active_ = false;
@@ -350,13 +519,14 @@ void EVSEComponent::enter_state_(EvseState next) {
     case EvseState::D2:
       graceful_stop_active_ = false;
       set_pilot_mode_(PilotMode::PWM);
-      // If the contactor remained closed during a short pause, leave it closed.
       break;
 
     case EvseState::E:
     case EvseState::F:
       graceful_stop_active_ = false;
       open_contactor_();
+      // Fail-safe output with the current one-bit CP driver architecture.
+      // This corresponds electrically to -12 V (F-like unavailable output).
       set_pilot_mode_(PilotMode::NEGATIVE_DC);
       break;
   }
@@ -381,10 +551,8 @@ void EVSEComponent::service_state_actions_(uint32_t now) {
 }
 
 void EVSEComponent::set_pilot_mode_(PilotMode mode) {
-  if (pilot_mode_ == mode) {
-    apply_pilot_output_();
+  if (pilot_mode_ == mode)
     return;
-  }
 
   pilot_mode_ = mode;
   apply_pilot_output_();
@@ -400,20 +568,20 @@ void EVSEComponent::apply_pilot_output_() {
 
   switch (pilot_mode_) {
     case PilotMode::POSITIVE_DC:
-      pilot_output_->set_level(1.0f);  // external driver -> +12 V
+      pilot_output_->set_level(1.0f);
       break;
     case PilotMode::PWM:
       pilot_output_->set_level(duty_for_current_(current_limit_));
       break;
     case PilotMode::NEGATIVE_DC:
-      pilot_output_->set_level(0.0f);  // external driver -> -12 V
+      pilot_output_->set_level(0.0f);
       break;
   }
 }
 
 void EVSEComponent::open_contactor_() {
-  if (contactor_ != nullptr)
-    contactor_->turn_off();
+  if (contactor_pin_ != nullptr)
+    contactor_pin_->digital_write(false);
 
   if (contactor_on_) {
     contactor_on_ = false;
@@ -427,8 +595,8 @@ void EVSEComponent::close_contactor_() {
   if (!diode_valid_)
     return;
 
-  if (contactor_ != nullptr)
-    contactor_->turn_on();
+  if (contactor_pin_ != nullptr)
+    contactor_pin_->digital_write(true);
 
   if (!contactor_on_) {
     contactor_on_ = true;
@@ -436,30 +604,27 @@ void EVSEComponent::close_contactor_() {
   }
 }
 
-void EVSEComponent::raise_fault_(FaultCode code, const char *reason) {
+void EVSEComponent::raise_fault_(FaultCode code) {
   if (fault_code_ != FaultCode::NONE)
     return;
 
   fault_code_ = code;
-  fault_reason_ = reason != nullptr ? reason : "EVSE fault";
   fault_since_ms_ = millis();
-
-  ESP_LOGE(TAG, "FAULT: %s", fault_reason_.c_str());
-  enter_state_(EvseState::E);
+  ESP_LOGE(TAG, "FAULT: %s", fault_to_string_(code));
+  enter_state_(EvseState::E, fault_since_ms_);
 }
 
-void EVSEComponent::clear_fault_() {
+void EVSEComponent::clear_fault_(uint32_t now) {
   fault_code_ = FaultCode::NONE;
-  fault_reason_ = "None";
   diode_invalid_since_ms_ = 0;
   diode_valid_ = true;
   stable_cp_ = CpLevel::UNKNOWN;
   candidate_cp_ = CpLevel::UNKNOWN;
 
   if (!available_)
-    enter_state_(EvseState::F);
+    enter_state_(EvseState::F, now);
   else
-    enter_state_(EvseState::A);
+    enter_state_(EvseState::A, now);
 }
 
 const char *EVSEComponent::cp_level_to_string_(CpLevel s) const {
@@ -488,35 +653,102 @@ const char *EVSEComponent::state_to_string_(EvseState s) const {
   }
 }
 
-const char *EVSEComponent::fault_to_string_() const {
-  return fault_reason_.c_str();
+const char *EVSEComponent::fault_to_string_(FaultCode code) const {
+  switch (code) {
+    case FaultCode::NONE: return "None";
+    case FaultCode::PILOT_VOLTAGE: return "CP voltage outside valid A/B/C/D windows";
+    case FaultCode::PILOT_TRANSITION: return "Invalid CP transition for current EVSE state";
+    case FaultCode::DIODE_FAULT: return "CP diode check failed";
+    default: return "Unknown fault";
+  }
+}
+
+void EVSEComponent::update_snapshot_(uint32_t heartbeat_ms) {
+#ifdef USE_ESP32
+  portENTER_CRITICAL(&data_mux_);
+#endif
+  snapshot_state_ = state_;
+  snapshot_cp_ = stable_cp_;
+  snapshot_fault_ = fault_code_;
+  snapshot_cp_high_mv_ = cp_high_mv_;
+  snapshot_cp_low_mv_ = cp_low_mv_;
+  snapshot_advertised_current_ = pilot_mode_ == PilotMode::PWM ? current_limit_ : 0.0f;
+  snapshot_contactor_on_ = contactor_on_;
+  snapshot_graceful_stop_ = graceful_stop_active_;
+  snapshot_task_heartbeat_ms_ = heartbeat_ms;
+  snapshot_task_late_cycles_ = task_late_cycles_;
+  snapshot_task_max_runtime_us_ = task_max_runtime_us_;
+#ifdef USE_ESP32
+  portEXIT_CRITICAL(&data_mux_);
+#endif
 }
 
 void EVSEComponent::publish_() {
-  if (state_sensor_ != nullptr)
-    state_sensor_->publish_state(state_to_string_(state_));
-  if (physical_state_sensor_ != nullptr)
-    physical_state_sensor_->publish_state(cp_level_to_string_(stable_cp_));
-  if (fault_reason_sensor_ != nullptr)
-    fault_reason_sensor_->publish_state(fault_to_string_());
-  if (cp_high_raw_sensor_ != nullptr)
-    cp_high_raw_sensor_->publish_state(cp_high_raw_);
-  if (cp_low_raw_sensor_ != nullptr)
-    cp_low_raw_sensor_->publish_state(cp_low_raw_);
-  if (advertised_current_sensor_ != nullptr)
-    advertised_current_sensor_->publish_state(pilot_mode_ == PilotMode::PWM ? current_limit_ : 0.0f);
+  EvseState state;
+  CpLevel cp;
+  FaultCode fault;
+  uint16_t high_mv;
+  uint16_t low_mv;
+  float advertised_current;
+  bool contactor_on;
+  bool graceful_stop;
+  uint32_t heartbeat_ms;
+  uint32_t late_cycles;
+  uint32_t max_runtime_us;
 
-  const bool connected = state_ == EvseState::B1 || state_ == EvseState::B2 ||
-                         state_ == EvseState::C1 || state_ == EvseState::C2 ||
-                         state_ == EvseState::D1 || state_ == EvseState::D2;
+#ifdef USE_ESP32
+  portENTER_CRITICAL(&data_mux_);
+#endif
+  state = snapshot_state_;
+  cp = snapshot_cp_;
+  fault = snapshot_fault_;
+  high_mv = snapshot_cp_high_mv_;
+  low_mv = snapshot_cp_low_mv_;
+  advertised_current = snapshot_advertised_current_;
+  contactor_on = snapshot_contactor_on_;
+  graceful_stop = snapshot_graceful_stop_;
+  heartbeat_ms = snapshot_task_heartbeat_ms_;
+  late_cycles = snapshot_task_late_cycles_;
+  max_runtime_us = snapshot_task_max_runtime_us_;
+#ifdef USE_ESP32
+  portEXIT_CRITICAL(&data_mux_);
+#endif
+
+  if (state_sensor_ != nullptr)
+    state_sensor_->publish_state(state_to_string_(state));
+  if (physical_state_sensor_ != nullptr)
+    physical_state_sensor_->publish_state(cp_level_to_string_(cp));
+  if (fault_reason_sensor_ != nullptr)
+    fault_reason_sensor_->publish_state(fault_to_string_(fault));
+  if (cp_high_mv_sensor_ != nullptr)
+    cp_high_mv_sensor_->publish_state(high_mv);
+  if (cp_low_mv_sensor_ != nullptr)
+    cp_low_mv_sensor_->publish_state(low_mv);
+  if (advertised_current_sensor_ != nullptr)
+    advertised_current_sensor_->publish_state(advertised_current);
+  if (task_late_cycles_sensor_ != nullptr)
+    task_late_cycles_sensor_->publish_state(late_cycles);
+  if (task_max_runtime_sensor_ != nullptr)
+    task_max_runtime_sensor_->publish_state(max_runtime_us);
+
+  const bool connected = state == EvseState::B1 || state == EvseState::B2 ||
+                         state == EvseState::C1 || state == EvseState::C2 ||
+                         state == EvseState::D1 || state == EvseState::D2;
   if (vehicle_connected_sensor_ != nullptr)
     vehicle_connected_sensor_->publish_state(connected);
   if (charging_sensor_ != nullptr)
-    charging_sensor_->publish_state(is_energizing_state_(state_) && contactor_on_);
+    charging_sensor_->publish_state((state == EvseState::C2 || state == EvseState::D2) && contactor_on);
   if (stopping_sensor_ != nullptr)
-    stopping_sensor_->publish_state(graceful_stop_active_);
+    stopping_sensor_->publish_state(graceful_stop);
   if (fault_sensor_ != nullptr)
-    fault_sensor_->publish_state(fault_code_ != FaultCode::NONE);
+    fault_sensor_->publish_state(fault != FaultCode::NONE);
+
+  if (task_running_sensor_ != nullptr) {
+    const uint32_t now = millis();
+    const uint32_t timeout_ms = sample_interval_ms_ * 10U < 500U ? 500U : sample_interval_ms_ * 10U;
+    const bool task_running = heartbeat_ms != 0 && (uint32_t) (now - heartbeat_ms) <= timeout_ms;
+    task_running_sensor_->publish_state(task_running);
+  }
 }
 
 }  // namespace evse

@@ -2,30 +2,78 @@
 
 Experimental IEC 61851 / SAE J1772 basic-signaling EVSE controller implemented as an ESPHome external component.
 
-**Current version: v0.2.1**  
-**Target:** classic ESP32 / ESP32 Relay X2, single phase, fixed Type 2 cable.
+**Current version: v0.4.0**  
+**Target:** classic dual-core ESP32 / ESP32 Relay X2, single phase, fixed Type 2 cable.
 
-> This is experimental firmware for a DIY EVSE. It is not a certified safety controller. Mains protection, residual-current protection, PE integrity, contactor supervision, thermal protection and the analog CP interface remain hardware responsibilities and must be engineered/tested independently.
+> Experimental DIY EVSE firmware. It is not a certified safety controller. Mains protection, residual-current protection, PE integrity, contactor supervision, thermal protection and the analog CP interface remain hardware responsibilities and must be engineered/tested independently.
 
-## v0.2.1 highlights
+## v0.4.0 highlights
 
-- Explicit EVSE states: A, B1, B2, C1, C2, D1, D2, E and F.
-- State `1` means energy is not offered: CP held at +12 V DC and contactor open (except during graceful stop).
-- State `2` means energy is offered: 1 kHz CP PWM; C2/D2 energize the contactor.
-- `Enable = OFF` while charging performs graceful stop:
-  1. C2/D2 -> C1/D1.
-  2. PWM is suppressed; CP goes to +12 V DC.
-  3. The contactor is kept closed while the EV winds current down.
-  4. If EV returns to B/A, the contactor opens immediately.
-  5. Otherwise it is forced open after 6 seconds.
-- `Available = OFF` enters State F and drives CP to -12 V DC.
-- Pilot/diode faults enter State E and drive CP to -12 V DC.
-- Transient pilot/diode faults retry after 60 seconds, or can be reset manually.
-- A/B/C/D are detected using explicit ADC windows with invalid gaps.
-- Diode checking uses a bounded raw ADC window for the negative CP half-cycle, not just one threshold.
-- State D can be accepted only when `allow_ventilation: true`; default is false.
+v0.4.0 changes CP measurement from uncalibrated 12-bit ADC counts to calibrated millivolts:
 
-The state semantics follow the same IEC/J1772 model used by the ESP32-EVSE reference project: B1/C1/D1 suppress PWM; B2/C2/D2 offer energy; leaving C2/D2 for a paused state raises CP to steady +12 V before opening the contactor.
+- explicitly configures GPIO34 to `ADC_11db`;
+- samples CP with `analogReadMilliVolts()`;
+- state windows are configured in mV;
+- Home Assistant exposes `EVSE CP High` / `EVSE CP Low` in mV;
+- default windows are calculated for the selected feedback network:
+  - R9 = 470 kΩ from CP,
+  - R10 = 100 kΩ to 3.3 V,
+  - R11 = 100 kΩ to GND;
+- sample window increased from 1.6 ms to 3.0 ms to give calibrated one-shot sampling enough time to observe the 100 µs positive CP pulse at the 6 A minimum duty cycle.
+
+The nominal feedback transfer is:
+
+```text
+VADC ≈ 1.49135 V + 0.096154 × VCP
+```
+
+which gives approximately:
+
+| CP | ADC |
+|---:|---:|
+| -12 V | 338 mV |
+| 0 V | 1491 mV |
+| +3 V | 1780 mV |
+| +6 V | 2068 mV |
+| +9 V | 2357 mV |
+| +12 V | 2645 mV |
+
+The initial state windows are:
+
+```yaml
+state_a_min_mv: 2550
+state_a_max_mv: 2745
+state_b_min_mv: 2260
+state_b_max_mv: 2455
+state_c_min_mv: 1970
+state_c_max_mv: 2170
+state_d_min_mv: 1680
+state_d_max_mv: 1880
+diode_min_mv: 240
+diode_max_mv: 435
+```
+
+These are theoretical starting values. Verify them on the assembled analog front-end before connecting a vehicle.
+
+## Architecture retained from v0.3.0
+
+```text
+Dedicated FreeRTOS task (default Core 1, priority 5)
+  -> calibrated CP ADC sampling
+  -> CP A/B/C/D classification
+  -> diode supervision
+  -> IEC state machine
+  -> CP duty/mode updates
+  -> direct contactor GPIO control
+
+ESPHome main loop
+  -> Home Assistant API
+  -> BLE proxy
+  -> Wi-Fi / logging
+  -> entity publication only
+```
+
+The task uses `vTaskDelayUntil()` for periodic execution. The default control period is 20 ms and the ADC acquisition window is 3 ms.
 
 ## GitHub install
 
@@ -38,101 +86,72 @@ external_components:
     refresh: 1min
 ```
 
-After tagging v0.2.1:
+After tagging v0.4.0:
 
 ```yaml
 external_components:
-  - source: github://eugentib/esphome-evse@v0.2.1
+  - source: github://eugentib/esphome-evse@v0.4.0
     components: [evse]
     refresh: never
 ```
 
 ## ESP32 Relay X2 pin assignment
 
-The example uses:
-
 ```text
 GPIO16 -> onboard relay 1 -> EXTERNAL contactor coil
 GPIO17 -> onboard relay 2 -> reserved
 GPIO25 -> 1 kHz logic output -> external bipolar CP driver
-GPIO34 -> protected/scaled CP feedback -> ADC
+GPIO34 -> protected/scaled CP feedback -> ADC1
 ```
 
-The onboard relay does **not** carry EV charging current.
+## Bluetooth proxy
 
-## Required CP driver behavior
+The example keeps the conservative passive/adverts-only configuration:
+
+```yaml
+esp32_ble_tracker:
+  software_coexistence: true
+  scan_parameters:
+    active: false
+
+bluetooth_proxy:
+  active: false
+```
+
+The EVSE control path remains in its own pinned FreeRTOS task.
+
+## State model
+
+- A — disconnected
+- B1 — connected, energy not offered
+- B2 — connected, PWM active
+- C1 — charge requested, paused/graceful stop
+- C2 — charging
+- D1/D2 — ventilation states
+- E — internal EVSE/pilot error state
+- F — unavailable
+
+`Enable = OFF` while charging performs graceful stop before the contactor is forced open.
+
+## CP feedback hardware
+
+The v0.4.0 defaults assume:
 
 ```text
-GPIO25 high / 100% duty -> CP +12 V
-GPIO25 low  /   0% duty -> CP -12 V
-GPIO25 PWM @ 1 kHz      -> CP +12 V / -12 V
+CP ---- 470k ----+
+                 |
+3.3V -- 100k ----+---- 1k ---- GPIO34
+                 |               |
+GND --- 100k ----+             470pF
+                                 |
+                                GND
 ```
 
-The Type 2 CP path still requires the IEC/J1772 series resistance and a correctly engineered analog front-end.
+Use correctly oriented rail clamps at the ADC pin. The ESP32 pin must never be exposed directly to CP.
 
-## CP feedback
+Because the offset is derived from the board's 3.3 V rail and resistor tolerances are finite, final bench verification remains required even though the ESP32 ADC conversion itself is calibrated to millivolts.
 
-The ADC front-end must preserve both CP polarities while keeping GPIO34 within 0..3.3 V.
-
-The example raw windows are **placeholders**, based approximately on the earlier proposed mapping:
-
-```text
-CP -12 V -> ADC ~0.3 V
-CP   0 V -> ADC ~1.65 V
-CP  +3 V -> ADC ~1.99 V
-CP  +6 V -> ADC ~2.33 V
-CP  +9 V -> ADC ~2.67 V
-CP +12 V -> ADC ~3.01 V
-```
-
-Calibrate the real hardware before connecting a vehicle.
-
-## State sequence
-
-```text
-A    +12 V DC       contactor open       no vehicle
- |
- +--> B1  +9 V DC   contactor open       vehicle connected, paused
-       |
-       | Enable ON
-       v
-      B2  +9/-12 PWM contactor open      energy offered
-       |
-       | EV requests energy
-       v
-      C2  +6/-12 PWM contactor closed    charging
-       |
-       | Enable OFF / pause
-       v
-      C1  +6 V DC    contactor held temporarily
-       |
-       | EV winds down -> B
-       v
-      B1             contactor opens
-```
-
-If the EV does not wind down during C1/D1, the contactor is forced open after the configured graceful-stop timeout (default 6 s).
-
-## Home Assistant entities
-
-The example exposes:
-
-- EVSE Enable
-- EVSE Available
-- EVSE Reset Fault
-- EVSE Current Limit
-- EVSE State
-- EVSE CP Physical State
-- EVSE Fault Reason
-- EVSE CP High Raw
-- EVSE CP Low Raw
-- EVSE Advertised Current
-- EVSE Vehicle Connected
-- EVSE Charging
-- EVSE Graceful Stop
-- EVSE Fault
-
-## Safety items still intentionally outside v0.2.1
+## Safety items still outside v0.4.0
 
 Before real charging, add and test at least:
 
@@ -144,13 +163,7 @@ Before real charging, add and test at least:
 - over-current protection;
 - correctly rated cabling, terminals, contactor and enclosure.
 
-Home Assistant is not in the safety chain.
-
-## Example
-
-Use `examples/esp32-relay-x2.yaml` in Home Assistant/ESPHome.
-
-`examples/esp32-relay-x2-ci.yaml` is the same configuration but loads the component locally so GitHub Actions validates the commit being tested rather than an older remote `main`.
+Home Assistant and Bluetooth are not in the safety chain.
 
 ## License
 

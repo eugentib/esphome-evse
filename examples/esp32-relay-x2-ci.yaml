@@ -20,6 +20,17 @@ wifi:
   ssid: "CI-DUMMY-WIFI"
   password: "CI-DUMMY-PASSWORD"
 
+# Bluetooth proxy is deliberately advertisement-only at first.
+# The EVSE control path runs in its own pinned FreeRTOS task, independent of
+# ESPHome's main loop and BLE callbacks.
+esp32_ble_tracker:
+  software_coexistence: true
+  scan_parameters:
+    active: false
+
+bluetooth_proxy:
+  active: false
+
 external_components:
   - source:
       type: local
@@ -27,13 +38,6 @@ external_components:
     components: [evse]
 
 switch:
-  # ESP32 Relay X2 onboard relay 1. It must only drive an EXTERNAL contactor coil.
-  - platform: gpio
-    id: evse_contactor_hw
-    pin: GPIO16
-    restore_mode: ALWAYS_OFF
-    internal: true
-
   - platform: template
     name: "EVSE Enable"
     id: evse_enable
@@ -92,36 +96,56 @@ evse:
   id: evse_controller
   pilot_output: cp_pwm
   pilot_adc_pin: GPIO34
-  contactor: evse_contactor_hw
+  # v0.4.0 uses ADC_11db and analogReadMilliVolts() for calibrated mV.
+
+  # v0.4.0 controls the onboard relay directly from the dedicated EVSE task.
+  # On ESP32 Relay X2, relay 1 is GPIO16. It must drive only an EXTERNAL
+  # contactor coil, never the EV charging current itself.
+  contactor_pin: GPIO16
 
   max_current: 16
   default_current: 6
   allow_ventilation: false
 
+  # The dedicated FreeRTOS task samples and executes the state machine every
+  # 20 ms. GPIO34 is ADC1, so BLE/Wi-Fi do not create the ADC2 conflict.
   sample_interval: 20ms
-  sample_window_us: 1600
+  sample_window_us: 3000
   stable_time: 250ms
   contactor_close_delay: 1ms
   graceful_stop_timeout: 6s
   diode_fault_time: 100ms
   fault_retry_time: 60s
 
-  # EXAMPLE/PLACEHOLDER WINDOWS ONLY.
-  # These roughly correspond to the proposed bipolar feedback mapping
-  # (~0.3 V at -12 V CP, ~1.65 V at 0 V, ~3.0 V at +12 V).
-  # You MUST calibrate them on your actual analog front-end before connecting a car.
-  state_a_min_raw: 3550
-  state_a_max_raw: 3950
-  state_b_min_raw: 3150
-  state_b_max_raw: 3475
-  state_c_min_raw: 2725
-  state_c_max_raw: 3075
-  state_d_min_raw: 2300
-  state_d_max_raw: 2650
+  # Dedicated EVSE task. Core 1 keeps it separate from the ESP32 BLE tracker,
+  # which runs on core 0 on dual-core ESP32 devices.
+  task_core: 1
+  task_priority: 5
+  task_stack_size: 4096
 
-  # Valid negative half-cycle around -12 V after scaling.
-  diode_min_raw: 200
-  diode_max_raw: 600
+  # Initial calibrated windows for the CP feedback network:
+  #   R9  = 470 kΩ from CP
+  #   R10 = 100 kΩ to 3.3 V
+  #   R11 = 100 kΩ to GND
+  #
+  # Theoretical transfer:
+  #   Vadc[mV] ~= 1491.35 + 96.154 * Vcp[V]
+  #
+  # IEC/J1772 nominal windows represented here:
+  #   A: +11...+13 V, B: +8...+10 V,
+  #   C: +5...+7 V,  D: +2...+4 V.
+  state_a_min_mv: 2550
+  state_a_max_mv: 2745
+  state_b_min_mv: 2260
+  state_b_max_mv: 2455
+  state_c_min_mv: 1970
+  state_c_max_mv: 2170
+  state_d_min_mv: 1680
+  state_d_max_mv: 1880
+
+  # Valid negative half-cycle: approximately -13...-11 V.
+  diode_min_mv: 240
+  diode_max_mv: 435
 
   state:
     name: "EVSE State"
@@ -129,12 +153,16 @@ evse:
     name: "EVSE CP Physical State"
   fault_reason:
     name: "EVSE Fault Reason"
-  cp_high_raw:
-    name: "EVSE CP High Raw"
-  cp_low_raw:
-    name: "EVSE CP Low Raw"
+  cp_high_mv:
+    name: "EVSE CP High"
+  cp_low_mv:
+    name: "EVSE CP Low"
   advertised_current:
     name: "EVSE Advertised Current"
+  task_late_cycles:
+    name: "EVSE Task Late Cycles"
+  task_max_runtime:
+    name: "EVSE Task Max Runtime"
   vehicle_connected:
     name: "EVSE Vehicle Connected"
   charging:
@@ -143,3 +171,5 @@ evse:
     name: "EVSE Graceful Stop"
   fault:
     name: "EVSE Fault"
+  task_running:
+    name: "EVSE Task Running"
