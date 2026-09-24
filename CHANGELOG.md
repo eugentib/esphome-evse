@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.4.3
+
+- Switch ESPHome example framework from Arduino to native ESP-IDF.
+- Remove ESPHome `output: ledc` dependency from the EVSE CP path.
+- EVSE component now owns GPIO25 directly through ESP-IDF LEDC at 1 kHz.
+- Use true static HIGH/LOW for CP DC states with `ledc_stop(..., idle_level)`.
+- Explicitly restart/reconfigure the LEDC channel when entering PWM.
+- Use `ledc_set_duty_and_update()` for duty updates while PWM is already active.
+- Add optional `EVSE Pilot Mode` and `EVSE Pilot Duty` development diagnostics.
+- Retain continuous ADC/DMA CP acquisition from v0.4.2.
+- Replace Arduino `millis()/micros()` usage with `esp_timer_get_time()`.
+- Add CP output hardware fault handling that prevents contactor energization.
+
 ## v0.4.2
 
 - Replace one-shot `analogReadMilliVolts()` CP acquisition with ESP-IDF ADC continuous/DMA mode on ADC1.

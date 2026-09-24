@@ -2,126 +2,75 @@
 
 Experimental IEC 61851 / SAE J1772 basic-signaling EVSE controller implemented as an ESPHome external component.
 
-**Current version: v0.4.2**  
+**Current version: v0.4.3**  
+**Framework: native ESP-IDF**  
 **Target:** classic dual-core ESP32 / ESP32 Relay X2, single phase, fixed Type 2 cable.
 
-> Experimental DIY EVSE firmware. It is not a certified safety controller. Mains protection, residual-current protection, PE integrity, contactor supervision, thermal protection and the analog CP interface remain hardware responsibilities and must be engineered/tested independently.
+> Experimental DIY EVSE firmware. It is not a certified safety controller.
 
-## v0.4.2 CP acquisition
+## v0.4.3
 
-v0.4.2 replaces the one-shot `analogReadMilliVolts()` peak search with the ESP-IDF continuous ADC/DMA driver on ADC1/GPIO34. This fixes aliasing observed at low CP PWM duty cycles.
+v0.4.3 moves the EVSE low-level path fully to native ESP-IDF.
 
-Default acquisition parameters:
+### Native CP PWM
+
+The component now owns GPIO25 directly. Remove the ESPHome `output: ledc` component and use:
 
 ```yaml
-adc_sample_rate: 80000
-adc_peak_samples: 16
-adc_min_samples: 200
-adc_fault_time: 100ms
-cp_confirm_windows: 3
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+evse:
+  pilot_pwm_pin: GPIO25
+  pilot_adc_pin: GPIO34
 ```
 
-At 80 kS/s a 1 kHz CP period contains about 80 ADC samples. Even at the IEC minimum 10% duty cycle (6 A), the 100 us positive pulse contains about 8 samples per PWM period. The control task drains roughly 20 periods of DMA data every 20 ms.
+The CP logic output uses the ESP-IDF LEDC peripheral directly at exactly 1 kHz.
 
-Instead of trusting a single maximum/minimum sample, v0.4.2 keeps the 16 highest and 16 lowest raw readings and averages each group. Only those two values are converted to calibrated millivolts with the ESP-IDF ADC calibration driver. This rejects isolated spikes while preserving the short positive CP plateau.
+- `POSITIVE_DC`: LEDC is stopped with idle HIGH -> true static +12 V through the external driver.
+- `PWM`: the LEDC channel is explicitly configured/restarted at 1 kHz with the IEC duty cycle.
+- `NEGATIVE_DC`: LEDC is stopped with idle LOW -> true static -12 V through the external driver.
 
-An ADC acquisition failure lasting `adc_fault_time` raises a dedicated EVSE fault and prevents energization. Physical CP state changes also require at least `cp_confirm_windows` consecutive acquisition windows in addition to `stable_time`.
+The code deliberately reconfigures the LEDC channel when moving from a static state into PWM instead of depending on implicit resume behavior after `ledc_stop()`.
 
-With `timing_debug: true`, two additional diagnostics can be exposed: `ADC Samples Last Cycle` and cumulative `ADC Read Errors`.
+At 6 A the requested duty is 10%; with the 10-bit LEDC timer the applied duty is about 9.96%.
 
-The supplied example is calibrated for the assembled feedback network R9=500 kΩ, R10=100 kΩ, R11=100 kΩ.
+### CP acquisition
 
-## v0.4.1 timing diagnostics
+The continuous ADC/DMA sampler from v0.4.2 is retained:
 
-v0.4.1 adds optional timing instrumentation for the dedicated EVSE task. It is controlled by one flag:
+- GPIO34 / ADC1;
+- 80 ksample/s default;
+- approximately 80 samples per 1 kHz CP period;
+- approximately 8 samples during the minimum 100 us positive pulse at 6 A;
+- top/bottom sample groups are averaged instead of trusting one peak sample;
+- raw extremes are converted to calibrated mV with the ESP-IDF ADC calibration driver.
+
+### Development diagnostics
+
+With:
 
 ```yaml
 timing_debug: true
 ```
 
-With the flag enabled, the example exposes:
+the supplied example also exposes:
 
-```yaml
-task_late_cycles:
-  name: "EVSE Task Late Cycles"
-task_last_runtime:
-  name: "EVSE Task Last Runtime"
-task_max_runtime:
-  name: "EVSE Task Max Runtime"
-task_last_lateness:
-  name: "EVSE Task Last Lateness"
-task_max_lateness:
-  name: "EVSE Task Max Lateness"
-task_missed_deadlines:
-  name: "EVSE Task Missed Deadlines"
-```
+- EVSE ADC Samples Last Cycle
+- EVSE ADC Read Errors
+- EVSE Pilot Duty
+- EVSE Pilot Mode
+- EVSE Task timing diagnostics
 
-For production, change only:
+For the final installation set only:
 
 ```yaml
 timing_debug: false
 ```
 
-The timing sensor definitions may remain in YAML; the component will not instantiate or publish them.
-
-Definitions:
-
-- **Late Cycles**: cycle started more than 1 ms after its nominal release time.
-- **Last/Max Runtime**: execution time of the EVSE control cycle.
-- **Last/Max Lateness**: positive delay between nominal and actual task start.
-- **Missed Deadlines**: cycle finished at or after the next nominal 20 ms release point.
-
-`EVSE Task Running` remains independent of `timing_debug`, because it is a useful operational health signal rather than development instrumentation.
-
-If `timing_debug` is omitted, v0.4.1 keeps backward compatibility with v0.4.0: the presence of the old `task_late_cycles` or `task_max_runtime` entities automatically enables timing instrumentation.
-
-## v0.4.0 calibrated CP measurement
-
-v0.4.0 changes CP measurement from uncalibrated 12-bit ADC counts to calibrated millivolts:
-
-- explicitly configures GPIO34 to `ADC_11db`;
-- samples CP with `analogReadMilliVolts()`;
-- state windows are configured in mV;
-- Home Assistant exposes `EVSE CP High` / `EVSE CP Low` in mV;
-- default windows are calculated for the selected feedback network:
-  - R9 = 470 kΩ from CP,
-  - R10 = 100 kΩ to 3.3 V,
-  - R11 = 100 kΩ to GND;
-- sample window increased from 1.6 ms to 3.0 ms to give calibrated one-shot sampling enough time to observe the 100 µs positive CP pulse at the 6 A minimum duty cycle.
-
-The nominal feedback transfer is:
-
-```text
-VADC ≈ 1.49135 V + 0.096154 × VCP
-```
-
-which gives approximately:
-
-| CP | ADC |
-|---:|---:|
-| -12 V | 338 mV |
-| 0 V | 1491 mV |
-| +3 V | 1780 mV |
-| +6 V | 2068 mV |
-| +9 V | 2357 mV |
-| +12 V | 2645 mV |
-
-The initial state windows are:
-
-```yaml
-state_a_min_mv: 2550
-state_a_max_mv: 2745
-state_b_min_mv: 2260
-state_b_max_mv: 2455
-state_c_min_mv: 1970
-state_c_max_mv: 2170
-state_d_min_mv: 1680
-state_d_max_mv: 1880
-diode_min_mv: 240
-diode_max_mv: 435
-```
-
-These are theoretical starting values. Verify them on the assembled analog front-end before connecting a vehicle.
+and these development entities are not instantiated.
 
 ## Architecture retained from v0.3.0
 
@@ -141,7 +90,7 @@ ESPHome main loop
   -> entity publication only
 ```
 
-The task uses `vTaskDelayUntil()` for periodic execution. The default control period is 20 ms. In v0.4.2 the ADC runs continuously in DMA mode between task executions; the task drains and evaluates the accumulated waveform samples each cycle.
+The task uses `vTaskDelayUntil()` for periodic execution. The default control period is 20 ms. In v0.4.3 the ADC runs continuously in DMA mode between task executions; the task drains and evaluates the accumulated waveform samples each cycle.
 
 ## GitHub install
 
@@ -154,11 +103,11 @@ external_components:
     refresh: 1min
 ```
 
-After tagging v0.4.2:
+After tagging v0.4.3:
 
 ```yaml
 external_components:
-  - source: github://eugentib/esphome-evse@v0.4.2
+  - source: github://eugentib/esphome-evse@v0.4.3
     components: [evse]
     refresh: never
 ```
@@ -203,7 +152,7 @@ The EVSE control path remains in its own pinned FreeRTOS task.
 
 ## CP feedback hardware
 
-The v0.4.2 example assumes:
+The v0.4.3 example assumes:
 
 ```text
 CP ---- 500k ----+
@@ -219,7 +168,7 @@ Use correctly oriented rail clamps at the ADC pin. The ESP32 pin must never be e
 
 Because the offset is derived from the board's 3.3 V rail and resistor tolerances are finite, final bench verification remains required even though the ESP32 ADC conversion itself is calibrated to millivolts.
 
-## Safety items still outside v0.4.2
+## Safety items still outside v0.4.3
 
 Before real charging, add and test at least:
 

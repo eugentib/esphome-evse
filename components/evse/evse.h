@@ -5,7 +5,6 @@
 #include "esphome/core/component.h"
 #include "esphome/core/gpio.h"
 #include "esphome/core/log.h"
-#include "esphome/components/output/float_output.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
@@ -19,6 +18,8 @@
 #include <esp_adc/adc_cali_scheme.h>
 #include <soc/soc_caps.h>
 #include <esp_err.h>
+#include <esp_timer.h>
+#include <driver/ledc.h>
 #endif
 
 namespace esphome {
@@ -33,6 +34,7 @@ enum class FaultCode : uint8_t {
   PILOT_TRANSITION,
   DIODE_FAULT,
   ADC_FAULT,
+  PILOT_OUTPUT,
 };
 
 class EVSEComponent : public Component {
@@ -42,7 +44,7 @@ class EVSEComponent : public Component {
   void dump_config() override;
   void on_shutdown() override;
 
-  void set_pilot_output(output::FloatOutput *out) { pilot_output_ = out; }
+  void set_pilot_pwm_pin(InternalGPIOPin *pin) { pilot_pwm_pin_ = pin; }
   void set_pilot_adc_pin(InternalGPIOPin *pin) { pilot_adc_pin_ = pin; }
   void set_contactor_pin(InternalGPIOPin *pin) { contactor_pin_ = pin; }
 
@@ -97,6 +99,8 @@ class EVSEComponent : public Component {
   void set_task_missed_deadlines_sensor(sensor::Sensor *s) { task_missed_deadlines_sensor_ = s; }
   void set_adc_sample_count_sensor(sensor::Sensor *s) { adc_sample_count_sensor_ = s; }
   void set_adc_read_errors_sensor(sensor::Sensor *s) { adc_read_errors_sensor_ = s; }
+  void set_pilot_duty_sensor(sensor::Sensor *s) { pilot_duty_sensor_ = s; }
+  void set_pilot_mode_sensor(text_sensor::TextSensor *s) { pilot_mode_sensor_ = s; }
   void set_vehicle_connected_sensor(binary_sensor::BinarySensor *s) { vehicle_connected_sensor_ = s; }
   void set_charging_sensor(binary_sensor::BinarySensor *s) { charging_sensor_ = s; }
   void set_stopping_sensor(binary_sensor::BinarySensor *s) { stopping_sensor_ = s; }
@@ -120,6 +124,10 @@ class EVSEComponent : public Component {
 
   void process_requests_();
 #ifdef USE_ESP32
+  bool setup_pilot_pwm_();
+  void shutdown_pilot_pwm_();
+  bool start_pilot_pwm_(float duty_fraction);
+  bool set_pilot_static_(bool high);
   bool setup_adc_dma_();
   void shutdown_adc_dma_();
   void flush_adc_dma_();
@@ -135,13 +143,15 @@ class EVSEComponent : public Component {
   void service_state_actions_(uint32_t now);
 
   void set_pilot_mode_(PilotMode mode);
-  void apply_pilot_output_();
+  bool apply_pilot_output_();
   void open_contactor_();
   void close_contactor_();
 
   void raise_fault_(FaultCode code);
   void clear_fault_(uint32_t now);
 
+  static uint32_t now_ms_();
+  static uint32_t now_us32_();
   float duty_for_current_(float amps) const;
   bool mv_in_window_(uint16_t v, uint16_t lo, uint16_t hi) const;
   bool is_energizing_state_(EvseState s) const;
@@ -153,9 +163,10 @@ class EVSEComponent : public Component {
   void update_snapshot_(uint32_t heartbeat_ms);
   void publish_();
 
-  output::FloatOutput *pilot_output_{nullptr};
+  InternalGPIOPin *pilot_pwm_pin_{nullptr};
   InternalGPIOPin *pilot_adc_pin_{nullptr};
   InternalGPIOPin *contactor_pin_{nullptr};
+  uint8_t pilot_pwm_gpio_num_{0};
   uint8_t pilot_adc_gpio_num_{0};
 
   text_sensor::TextSensor *state_sensor_{nullptr};
@@ -172,6 +183,8 @@ class EVSEComponent : public Component {
   sensor::Sensor *task_missed_deadlines_sensor_{nullptr};
   sensor::Sensor *adc_sample_count_sensor_{nullptr};
   sensor::Sensor *adc_read_errors_sensor_{nullptr};
+  sensor::Sensor *pilot_duty_sensor_{nullptr};
+  text_sensor::TextSensor *pilot_mode_sensor_{nullptr};
   binary_sensor::BinarySensor *vehicle_connected_sensor_{nullptr};
   binary_sensor::BinarySensor *charging_sensor_{nullptr};
   binary_sensor::BinarySensor *stopping_sensor_{nullptr};
@@ -214,6 +227,13 @@ class EVSEComponent : public Component {
   adc_cali_handle_t adc_cali_handle_{nullptr};
   adc_channel_t adc_channel_{ADC_CHANNEL_0};
   alignas(4) uint8_t adc_read_buffer_[1024]{};
+
+  static constexpr ledc_mode_t PILOT_LEDC_MODE = LEDC_HIGH_SPEED_MODE;
+  static constexpr ledc_timer_t PILOT_LEDC_TIMER = LEDC_TIMER_0;
+  static constexpr ledc_channel_t PILOT_LEDC_CHANNEL = LEDC_CHANNEL_0;
+  static constexpr ledc_timer_bit_t PILOT_LEDC_RESOLUTION = LEDC_TIMER_10_BIT;
+  static constexpr uint32_t PILOT_LEDC_COUNTS = 1U << 10;
+  static constexpr uint32_t PILOT_PWM_HZ = 1000;
 #endif
 
   // Requests written by the ESPHome/main-loop side, consumed by the EVSE task.
@@ -231,6 +251,9 @@ class EVSEComponent : public Component {
   bool diode_sample_valid_{true};
   bool diode_valid_{true};
   bool adc_sample_valid_{false};
+  bool pilot_hw_ok_{false};
+  bool pilot_pwm_running_{false};
+  float pilot_duty_percent_{100.0f};
 
   uint16_t cp_high_mv_{0};
   uint16_t cp_low_mv_{3300};
@@ -276,6 +299,8 @@ class EVSEComponent : public Component {
   uint32_t snapshot_task_missed_deadlines_{0};
   uint32_t snapshot_adc_sample_count_{0};
   uint32_t snapshot_adc_read_errors_{0};
+  float snapshot_pilot_duty_percent_{100.0f};
+  PilotMode snapshot_pilot_mode_{PilotMode::POSITIVE_DC};
 
   uint32_t last_publish_ms_{0};
 };

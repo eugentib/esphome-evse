@@ -1,9 +1,5 @@
 #include "evse.h"
 
-#ifdef USE_ARDUINO
-#include <Arduino.h>
-#endif
-
 namespace esphome {
 namespace evse {
 
@@ -11,17 +7,22 @@ static const char *const TAG = "evse";
 
 void EVSEComponent::setup() {
 #ifndef USE_ESP32
-  ESP_LOGE(TAG, "v0.4.2 requires ESP32");
+  ESP_LOGE(TAG, "v0.4.3 requires ESP32");
   mark_failed();
   return;
 #else
-#ifndef USE_ARDUINO
-  ESP_LOGE(TAG, "v0.4.2 currently requires the Arduino framework");
-  mark_failed();
-  return;
-#else
-  if (pilot_adc_pin_ == nullptr || contactor_pin_ == nullptr || pilot_output_ == nullptr) {
-    ESP_LOGE(TAG, "Pilot ADC, contactor pin and pilot output must all be configured");
+  if (pilot_pwm_pin_ == nullptr || pilot_adc_pin_ == nullptr || contactor_pin_ == nullptr) {
+    ESP_LOGE(TAG, "Pilot PWM pin, pilot ADC pin and contactor pin must all be configured");
+    mark_failed();
+    return;
+  }
+
+  pilot_pwm_pin_->setup();
+  pilot_pwm_gpio_num_ = pilot_pwm_pin_->get_pin();
+  if (!setup_pilot_pwm_()) {
+    ESP_LOGE(TAG, "Failed to initialize native ESP-IDF LEDC on GPIO%u", pilot_pwm_gpio_num_);
+    contactor_pin_->setup();
+    contactor_pin_->digital_write(false);
     mark_failed();
     return;
   }
@@ -33,7 +34,8 @@ void EVSEComponent::setup() {
     ESP_LOGE(TAG, "Failed to initialize continuous ADC/DMA on GPIO%u", pilot_adc_gpio_num_);
     contactor_pin_->setup();
     contactor_pin_->digital_write(false);
-    pilot_output_->set_level(0.0f);
+    set_pilot_static_(false);
+    shutdown_pilot_pwm_();
     mark_failed();
     return;
   }
@@ -49,9 +51,16 @@ void EVSEComponent::setup() {
   fault_code_ = FaultCode::NONE;
   graceful_stop_active_ = false;
   pilot_mode_ = PilotMode::POSITIVE_DC;
-  apply_pilot_output_();
+  if (!apply_pilot_output_()) {
+    ESP_LOGE(TAG, "Failed to apply initial +12 V CP state");
+    contactor_pin_->digital_write(false);
+    shutdown_adc_dma_();
+    shutdown_pilot_pwm_();
+    mark_failed();
+    return;
+  }
 
-  const uint32_t now = millis();
+  const uint32_t now = now_ms_();
   candidate_since_ms_ = now;
   state_entered_ms_ = now;
   update_snapshot_(now);
@@ -69,26 +78,28 @@ void EVSEComponent::setup() {
   if (rc != pdPASS) {
     ESP_LOGE(TAG, "Failed to create EVSE FreeRTOS task");
     contactor_pin_->digital_write(false);
-    pilot_output_->set_level(0.0f);
+    set_pilot_static_(false);
     shutdown_adc_dma_();
+    shutdown_pilot_pwm_();
     mark_failed();
     return;
   }
 
   ESP_LOGI(
       TAG,
-      "EVSE v0.4.2 initialized; ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
+      "EVSE v0.4.3 initialized; PWM=GPIO%u ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
+      pilot_pwm_gpio_num_,
       pilot_adc_gpio_num_,
       task_core_,
       task_priority_,
       task_stack_size_
   );
 #endif
-#endif
 }
 
 void EVSEComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.2:");
+  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.3:");
+  LOG_PIN("  Pilot PWM Pin: ", pilot_pwm_pin_);
   LOG_PIN("  Pilot ADC Pin: ", pilot_adc_pin_);
   LOG_PIN("  Contactor Pin: ", contactor_pin_);
   ESP_LOGCONFIG(TAG, "  Max/default current: %.1f / %.1f A", max_current_, default_current_);
@@ -96,6 +107,7 @@ void EVSEComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  EVSE task: core=%u priority=%u stack=%" PRIu32 " B", task_core_, task_priority_, task_stack_size_);
   ESP_LOGCONFIG(TAG, "  Timing debug: %s", YESNO(timing_debug_));
   ESP_LOGCONFIG(TAG, "  Task/sample interval: %" PRIu32 " ms", sample_interval_ms_);
+  ESP_LOGCONFIG(TAG, "  Pilot PWM: native ESP-IDF LEDC, 1 kHz");
   ESP_LOGCONFIG(TAG, "  ADC mode: continuous DMA");
   ESP_LOGCONFIG(TAG, "  ADC sample rate: %" PRIu32 " samples/s", adc_sample_rate_hz_);
   ESP_LOGCONFIG(TAG, "  ADC peak averaging: %u samples", adc_peak_samples_);
@@ -113,7 +125,7 @@ void EVSEComponent::dump_config() {
 }
 
 void EVSEComponent::loop() {
-  const uint32_t now = millis();
+  const uint32_t now = now_ms_();
   if ((uint32_t) (now - last_publish_ms_) >= 500) {
     last_publish_ms_ = now;
     publish_();
@@ -127,10 +139,11 @@ void EVSEComponent::on_shutdown() {
 #endif
   if (contactor_pin_ != nullptr)
     contactor_pin_->digital_write(false);
-  if (pilot_output_ != nullptr)
-    pilot_output_->set_level(0.0f);  // external CP driver -> -12 V fail-safe
 #ifdef USE_ESP32
+  // External CP driver mapping: logic LOW -> -12 V fail-safe.
+  set_pilot_static_(false);
   shutdown_adc_dma_();
+  shutdown_pilot_pwm_();
 #endif
 }
 
@@ -230,9 +243,9 @@ void EVSEComponent::task_loop_() {
   const uint32_t period_us = sample_interval_ms_ * 1000UL;
   static constexpr uint32_t LATE_THRESHOLD_US = 1000UL;
 
-  // Only used when timing_debug_ is enabled. Unsigned micros() arithmetic is
-  // intentionally used so the normal ~71 minute micros() wrap is harmless.
-  uint32_t expected_start_us = timing_debug_ ? micros() : 0;
+  // Only used when timing_debug_ is enabled. Unsigned now_us32_() arithmetic is
+  // intentionally used so the normal ~71 minute now_us32_() wrap is harmless.
+  uint32_t expected_start_us = timing_debug_ ? now_us32_() : 0;
   bool first_cycle = true;
 
   for (;;) {
@@ -240,7 +253,7 @@ void EVSEComponent::task_loop_() {
     uint32_t lateness_us = 0;
 
     if (timing_debug_) {
-      cycle_start_us = micros();
+      cycle_start_us = now_us32_();
 
       if (!first_cycle) {
         const int32_t delta_us = static_cast<int32_t>(cycle_start_us - expected_start_us);
@@ -250,7 +263,7 @@ void EVSEComponent::task_loop_() {
     }
 
     first_cycle = false;
-    const uint32_t now = millis();
+    const uint32_t now = now_ms_();
 
     process_requests_();
     sample_cp_();
@@ -260,7 +273,7 @@ void EVSEComponent::task_loop_() {
     control_(now);
 
     if (timing_debug_) {
-      const uint32_t runtime_us = static_cast<uint32_t>(micros() - cycle_start_us);
+      const uint32_t runtime_us = static_cast<uint32_t>(now_us32_() - cycle_start_us);
 
       task_last_runtime_us_ = runtime_us;
       task_last_lateness_us_ = lateness_us;
@@ -286,6 +299,150 @@ void EVSEComponent::task_loop_() {
     update_snapshot_(now);
     vTaskDelayUntil(&last_wake, period_ticks);
   }
+}
+#endif
+
+
+uint32_t EVSEComponent::now_ms_() {
+#ifdef USE_ESP32
+  return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+#else
+  return 0;
+#endif
+}
+
+uint32_t EVSEComponent::now_us32_() {
+#ifdef USE_ESP32
+  return static_cast<uint32_t>(esp_timer_get_time());
+#else
+  return 0;
+#endif
+}
+
+#ifdef USE_ESP32
+bool EVSEComponent::setup_pilot_pwm_() {
+  ledc_timer_config_t timer_cfg = {};
+  timer_cfg.speed_mode = PILOT_LEDC_MODE;
+  timer_cfg.duty_resolution = PILOT_LEDC_RESOLUTION;
+  timer_cfg.timer_num = PILOT_LEDC_TIMER;
+  timer_cfg.freq_hz = PILOT_PWM_HZ;
+  timer_cfg.clk_cfg = LEDC_AUTO_CLK;
+
+  esp_err_t err = ledc_timer_config(&timer_cfg);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "ledc_timer_config failed: %s", esp_err_to_name(err));
+    return false;
+  }
+
+  ledc_channel_config_t channel_cfg = {};
+  channel_cfg.gpio_num = pilot_pwm_gpio_num_;
+  channel_cfg.speed_mode = PILOT_LEDC_MODE;
+  channel_cfg.channel = PILOT_LEDC_CHANNEL;
+  channel_cfg.intr_type = LEDC_INTR_DISABLE;
+  channel_cfg.timer_sel = PILOT_LEDC_TIMER;
+  channel_cfg.duty = 0;
+  channel_cfg.hpoint = 0;
+
+  err = ledc_channel_config(&channel_cfg);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "ledc_channel_config failed: %s", esp_err_to_name(err));
+    return false;
+  }
+
+  // State A at boot is a true static HIGH, not a 99.9% LEDC waveform.
+  err = ledc_stop(PILOT_LEDC_MODE, PILOT_LEDC_CHANNEL, 1);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "ledc_stop(HIGH) failed: %s", esp_err_to_name(err));
+    return false;
+  }
+
+  pilot_pwm_running_ = false;
+  pilot_hw_ok_ = true;
+  pilot_duty_percent_ = 100.0f;
+
+  const uint32_t actual_hz = ledc_get_freq(PILOT_LEDC_MODE, PILOT_LEDC_TIMER);
+  ESP_LOGI(TAG, "Native LEDC CP initialized: GPIO%u, requested=%u Hz actual=%" PRIu32 " Hz",
+           pilot_pwm_gpio_num_, PILOT_PWM_HZ, actual_hz);
+  return actual_hz == PILOT_PWM_HZ;
+}
+
+void EVSEComponent::shutdown_pilot_pwm_() {
+  if (!pilot_hw_ok_)
+    return;
+  ledc_stop(PILOT_LEDC_MODE, PILOT_LEDC_CHANNEL, 0);
+  pilot_pwm_running_ = false;
+  pilot_hw_ok_ = false;
+}
+
+bool EVSEComponent::set_pilot_static_(bool high) {
+  if (!pilot_hw_ok_)
+    return false;
+
+  const esp_err_t err = ledc_stop(PILOT_LEDC_MODE, PILOT_LEDC_CHANNEL, high ? 1U : 0U);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "ledc_stop(%s) failed: %s", high ? "HIGH" : "LOW", esp_err_to_name(err));
+    pilot_hw_ok_ = false;
+    return false;
+  }
+
+  pilot_pwm_running_ = false;
+  pilot_duty_percent_ = high ? 100.0f : 0.0f;
+  return true;
+}
+
+bool EVSEComponent::start_pilot_pwm_(float duty_fraction) {
+  if (!pilot_hw_ok_)
+    return false;
+
+  if (duty_fraction < 0.0f)
+    duty_fraction = 0.0f;
+  if (duty_fraction > 1.0f)
+    duty_fraction = 1.0f;
+
+  uint32_t duty_counts = static_cast<uint32_t>(duty_fraction * static_cast<float>(PILOT_LEDC_COUNTS) + 0.5f);
+  // For actual PWM we never request 0% or 100%. Clamp anyway so the classic
+  // ESP32 LEDC never receives 2^resolution, which is not valid at max count.
+  if (duty_counts < 1U)
+    duty_counts = 1U;
+  if (duty_counts >= PILOT_LEDC_COUNTS)
+    duty_counts = PILOT_LEDC_COUNTS - 1U;
+
+  esp_err_t err;
+  if (!pilot_pwm_running_) {
+    // Reconfigure the channel after ledc_stop(). This explicitly restarts the
+    // peripheral and avoids relying on implicit resume semantics.
+    ledc_channel_config_t channel_cfg = {};
+    channel_cfg.gpio_num = pilot_pwm_gpio_num_;
+    channel_cfg.speed_mode = PILOT_LEDC_MODE;
+    channel_cfg.channel = PILOT_LEDC_CHANNEL;
+    channel_cfg.intr_type = LEDC_INTR_DISABLE;
+    channel_cfg.timer_sel = PILOT_LEDC_TIMER;
+    channel_cfg.duty = duty_counts;
+    channel_cfg.hpoint = 0;
+    err = ledc_channel_config(&channel_cfg);
+  } else {
+    // Thread-safe API; only the EVSE task controls this channel.
+    err = ledc_set_duty_and_update(PILOT_LEDC_MODE, PILOT_LEDC_CHANNEL, duty_counts, 0);
+  }
+
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to apply CP PWM duty=%" PRIu32 "/%" PRIu32 ": %s",
+             duty_counts, PILOT_LEDC_COUNTS, esp_err_to_name(err));
+    ledc_stop(PILOT_LEDC_MODE, PILOT_LEDC_CHANNEL, 0);
+    pilot_pwm_running_ = false;
+    pilot_hw_ok_ = false;
+    pilot_duty_percent_ = 0.0f;
+    return false;
+  }
+
+  pilot_pwm_running_ = true;
+  pilot_duty_percent_ =
+      100.0f * static_cast<float>(duty_counts) / static_cast<float>(PILOT_LEDC_COUNTS);
+
+  const uint32_t actual_hz = ledc_get_freq(PILOT_LEDC_MODE, PILOT_LEDC_TIMER);
+  ESP_LOGD(TAG, "CP PWM active: %" PRIu32 " Hz, duty=%.2f%% (%" PRIu32 "/%" PRIu32 ")",
+           actual_hz, pilot_duty_percent_, duty_counts, PILOT_LEDC_COUNTS);
+  return actual_hz == PILOT_PWM_HZ;
 }
 #endif
 
@@ -320,6 +477,7 @@ bool EVSEComponent::setup_adc_dma_() {
   adc_continuous_config_t cfg = {};
   cfg.sample_freq_hz = adc_sample_rate_hz_;
   cfg.conv_mode = ADC_CONV_SINGLE_UNIT_1;
+  cfg.format = ADC_DIGI_OUTPUT_FORMAT_TYPE1;
   cfg.pattern_num = 1;
   cfg.adc_pattern = &pattern;
 
@@ -427,7 +585,7 @@ void EVSEComponent::process_requests_() {
 
   if (req_reset && fault_code_ != FaultCode::NONE) {
     ESP_LOGI(TAG, "Manual fault reset");
-    clear_fault_(millis());
+    clear_fault_(now_ms_());
   }
 }
 
@@ -665,6 +823,11 @@ EvseState EVSEComponent::target_state_for_cp_(CpLevel cp, bool charging_allowed)
 }
 
 void EVSEComponent::control_(uint32_t now) {
+  if (!pilot_hw_ok_ && fault_code_ == FaultCode::NONE) {
+    raise_fault_(FaultCode::PILOT_OUTPUT);
+    return;
+  }
+
   if (fault_code_ != FaultCode::NONE) {
     if (state_ != EvseState::E)
       enter_state_(EvseState::E, now);
@@ -813,21 +976,33 @@ void EVSEComponent::set_pilot_mode_(PilotMode mode) {
   ESP_LOGI(TAG, "Pilot mode -> %s", name);
 }
 
-void EVSEComponent::apply_pilot_output_() {
-  if (pilot_output_ == nullptr)
-    return;
+bool EVSEComponent::apply_pilot_output_() {
+#ifdef USE_ESP32
+  bool ok = false;
 
   switch (pilot_mode_) {
     case PilotMode::POSITIVE_DC:
-      pilot_output_->set_level(1.0f);
+      ok = set_pilot_static_(true);
       break;
     case PilotMode::PWM:
-      pilot_output_->set_level(duty_for_current_(current_limit_));
+      ok = start_pilot_pwm_(duty_for_current_(current_limit_));
       break;
     case PilotMode::NEGATIVE_DC:
-      pilot_output_->set_level(0.0f);
+      ok = set_pilot_static_(false);
       break;
   }
+
+  if (!ok) {
+    ESP_LOGE(TAG, "CP pilot hardware update failed; contactor forced OFF");
+    if (contactor_pin_ != nullptr)
+      contactor_pin_->digital_write(false);
+    contactor_on_ = false;
+  }
+
+  return ok;
+#else
+  return false;
+#endif
 }
 
 void EVSEComponent::open_contactor_() {
@@ -860,7 +1035,7 @@ void EVSEComponent::raise_fault_(FaultCode code) {
     return;
 
   fault_code_ = code;
-  fault_since_ms_ = millis();
+  fault_since_ms_ = now_ms_();
   ESP_LOGE(TAG, "FAULT: %s", fault_to_string_(code));
   enter_state_(EvseState::E, fault_since_ms_);
 }
@@ -913,6 +1088,7 @@ const char *EVSEComponent::fault_to_string_(FaultCode code) const {
     case FaultCode::PILOT_TRANSITION: return "Invalid CP transition for current EVSE state";
     case FaultCode::DIODE_FAULT: return "CP diode check failed";
     case FaultCode::ADC_FAULT: return "CP ADC/DMA acquisition failed";
+    case FaultCode::PILOT_OUTPUT: return "CP PWM/LEDC output failure";
     default: return "Unknown fault";
   }
 }
@@ -938,6 +1114,8 @@ void EVSEComponent::update_snapshot_(uint32_t heartbeat_ms) {
   snapshot_task_missed_deadlines_ = task_missed_deadlines_;
   snapshot_adc_sample_count_ = adc_last_sample_count_;
   snapshot_adc_read_errors_ = adc_read_errors_;
+  snapshot_pilot_duty_percent_ = pilot_duty_percent_;
+  snapshot_pilot_mode_ = pilot_mode_;
 #ifdef USE_ESP32
   portEXIT_CRITICAL(&data_mux_);
 #endif
@@ -961,6 +1139,8 @@ void EVSEComponent::publish_() {
   uint32_t missed_deadlines;
   uint32_t adc_sample_count;
   uint32_t adc_read_errors;
+  float pilot_duty_percent;
+  PilotMode pilot_mode;
 
 #ifdef USE_ESP32
   portENTER_CRITICAL(&data_mux_);
@@ -982,6 +1162,8 @@ void EVSEComponent::publish_() {
   missed_deadlines = snapshot_task_missed_deadlines_;
   adc_sample_count = snapshot_adc_sample_count_;
   adc_read_errors = snapshot_adc_read_errors_;
+  pilot_duty_percent = snapshot_pilot_duty_percent_;
+  pilot_mode = snapshot_pilot_mode_;
 #ifdef USE_ESP32
   portEXIT_CRITICAL(&data_mux_);
 #endif
@@ -1014,6 +1196,14 @@ void EVSEComponent::publish_() {
     adc_sample_count_sensor_->publish_state(adc_sample_count);
   if (adc_read_errors_sensor_ != nullptr)
     adc_read_errors_sensor_->publish_state(adc_read_errors);
+  if (pilot_duty_sensor_ != nullptr)
+    pilot_duty_sensor_->publish_state(pilot_duty_percent);
+  if (pilot_mode_sensor_ != nullptr) {
+    const char *mode_name =
+        pilot_mode == PilotMode::POSITIVE_DC ? "+12 V DC" :
+        pilot_mode == PilotMode::PWM ? "1 kHz PWM" : "-12 V DC";
+    pilot_mode_sensor_->publish_state(mode_name);
+  }
 
   const bool connected = state == EvseState::B1 || state == EvseState::B2 ||
                          state == EvseState::C1 || state == EvseState::C2 ||
@@ -1028,7 +1218,7 @@ void EVSEComponent::publish_() {
     fault_sensor_->publish_state(fault != FaultCode::NONE);
 
   if (task_running_sensor_ != nullptr) {
-    const uint32_t now = millis();
+    const uint32_t now = now_ms_();
     const uint32_t timeout_ms = sample_interval_ms_ * 10U < 500U ? 500U : sample_interval_ms_ * 10U;
     const bool task_running = heartbeat_ms != 0 && (uint32_t) (now - heartbeat_ms) <= timeout_ms;
     task_running_sensor_->publish_state(task_running);

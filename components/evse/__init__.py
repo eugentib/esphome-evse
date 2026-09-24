@@ -1,14 +1,14 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
-from esphome.components import output, sensor, binary_sensor, text_sensor
+from esphome.components import sensor, binary_sensor, text_sensor
 from esphome.const import CONF_ID
 
 CODEOWNERS = []
 DEPENDENCIES = ["esp32"]
-AUTO_LOAD = ["sensor", "binary_sensor", "text_sensor", "output"]
+AUTO_LOAD = ["sensor", "binary_sensor", "text_sensor"]
 
-CONF_PILOT_OUTPUT = "pilot_output"
+CONF_PILOT_PWM_PIN = "pilot_pwm_pin"
 CONF_PILOT_ADC_PIN = "pilot_adc_pin"
 CONF_CONTACTOR_PIN = "contactor_pin"
 CONF_MAX_CURRENT = "max_current"
@@ -56,6 +56,8 @@ CONF_TASK_MAX_LATENESS = "task_max_lateness"
 CONF_TASK_MISSED_DEADLINES = "task_missed_deadlines"
 CONF_ADC_SAMPLE_COUNT = "adc_sample_count"
 CONF_ADC_READ_ERRORS = "adc_read_errors"
+CONF_PILOT_DUTY = "pilot_duty"
+CONF_PILOT_MODE = "pilot_mode"
 CONF_VEHICLE_CONNECTED = "vehicle_connected"
 CONF_CHARGING = "charging"
 CONF_STOPPING = "stopping"
@@ -69,7 +71,7 @@ mv = cv.int_range(min=0, max=3300)
 
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(EVSEComponent),
-    cv.Required(CONF_PILOT_OUTPUT): cv.use_id(output.FloatOutput),
+    cv.Required(CONF_PILOT_PWM_PIN): pins.internal_gpio_output_pin_schema,
     cv.Required(CONF_PILOT_ADC_PIN): pins.internal_gpio_input_pin_schema,
     cv.Required(CONF_CONTACTOR_PIN): pins.internal_gpio_output_pin_schema,
 
@@ -141,6 +143,10 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_ADC_READ_ERRORS): sensor.sensor_schema(
         accuracy_decimals=0, icon="mdi:alert-circle-outline"
     ),
+    cv.Optional(CONF_PILOT_DUTY): sensor.sensor_schema(
+        unit_of_measurement="%", accuracy_decimals=1, icon="mdi:pulse"
+    ),
+    cv.Optional(CONF_PILOT_MODE): text_sensor.text_sensor_schema(),
     cv.Optional(CONF_VEHICLE_CONNECTED): binary_sensor.binary_sensor_schema(),
     cv.Optional(CONF_CHARGING): binary_sensor.binary_sensor_schema(),
     cv.Optional(CONF_STOPPING): binary_sensor.binary_sensor_schema(),
@@ -195,11 +201,11 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    pilot = await cg.get_variable(config[CONF_PILOT_OUTPUT])
+    pilot_pwm_pin = await cg.gpio_pin_expression(config[CONF_PILOT_PWM_PIN])
     pilot_adc_pin = await cg.gpio_pin_expression(config[CONF_PILOT_ADC_PIN])
     contactor_pin = await cg.gpio_pin_expression(config[CONF_CONTACTOR_PIN])
 
-    cg.add(var.set_pilot_output(pilot))
+    cg.add(var.set_pilot_pwm_pin(pilot_pwm_pin))
     cg.add(var.set_pilot_adc_pin(pilot_adc_pin))
     cg.add(var.set_contactor_pin(contactor_pin))
     cg.add(var.set_max_current(config[CONF_MAX_CURRENT]))
@@ -232,6 +238,8 @@ async def to_code(config):
         CONF_TASK_MISSED_DEADLINES,
         CONF_ADC_SAMPLE_COUNT,
         CONF_ADC_READ_ERRORS,
+        CONF_PILOT_DUTY,
+        CONF_PILOT_MODE,
     )
     if CONF_TIMING_DEBUG in config:
         timing_debug = config[CONF_TIMING_DEBUG]
@@ -295,6 +303,12 @@ async def to_code(config):
         if CONF_ADC_READ_ERRORS in config:
             ent = await sensor.new_sensor(config[CONF_ADC_READ_ERRORS])
             cg.add(var.set_adc_read_errors_sensor(ent))
+        if CONF_PILOT_DUTY in config:
+            ent = await sensor.new_sensor(config[CONF_PILOT_DUTY])
+            cg.add(var.set_pilot_duty_sensor(ent))
+        if CONF_PILOT_MODE in config:
+            ent = await text_sensor.new_text_sensor(config[CONF_PILOT_MODE])
+            cg.add(var.set_pilot_mode_sensor(ent))
     if CONF_VEHICLE_CONNECTED in config:
         ent = await binary_sensor.new_binary_sensor(config[CONF_VEHICLE_CONNECTED])
         cg.add(var.set_vehicle_connected_sensor(ent))

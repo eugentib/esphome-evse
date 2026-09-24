@@ -9,7 +9,7 @@ esphome:
 esp32:
   board: esp32dev
   framework:
-    type: arduino
+    type: esp-idf
 
 logger:
 api:
@@ -66,16 +66,12 @@ button:
     on_press:
       - lambda: id(evse_controller).reset_fault();
 
-# GPIO25 supplies the 1 kHz LOGIC signal to the external bipolar CP driver.
-# External driver mapping required by this component:
-#   logic 1 / 100% duty -> +12 V CP
-#   logic 0 /   0% duty -> -12 V CP
-#   PWM                  -> +12/-12 V CP
-output:
-  - platform: ledc
-    id: cp_pwm
-    pin: GPIO25
-    frequency: 1000Hz
+# GPIO25 is owned directly by the EVSE component through ESP-IDF LEDC.
+# External bipolar driver mapping:
+#   GPIO25 HIGH -> +12 V CP
+#   GPIO25 LOW  -> -12 V CP
+#   1 kHz PWM   -> +12/-12 V CP
+# Static A/B1/C1 states use true DC HIGH, not a ~100% PWM waveform.
 
 number:
   - platform: template
@@ -94,10 +90,10 @@ number:
 
 evse:
   id: evse_controller
-  pilot_output: cp_pwm
+  pilot_pwm_pin: GPIO25
   pilot_adc_pin: GPIO34
 
-  # v0.4.2 controls the onboard relay directly from the dedicated EVSE task.
+  # v0.4.3 controls the onboard relay directly from the dedicated EVSE task.
   # On ESP32 Relay X2, relay 1 is GPIO16. It must drive only an EXTERNAL
   # contactor coil, never the EV charging current itself.
   contactor_pin: GPIO16
@@ -187,6 +183,10 @@ evse:
     name: "EVSE ADC Samples Last Cycle"
   adc_read_errors:
     name: "EVSE ADC Read Errors"
+  pilot_duty:
+    name: "EVSE Pilot Duty"
+  pilot_mode:
+    name: "EVSE Pilot Mode"
   vehicle_connected:
     name: "EVSE Vehicle Connected"
   charging:
