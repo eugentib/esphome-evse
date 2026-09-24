@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.4.2
+
+- Replace one-shot `analogReadMilliVolts()` CP acquisition with ESP-IDF ADC continuous/DMA mode on ADC1.
+- Default ADC sampling rate: 80 kS/s, giving ~8 samples in the 100 us positive pulse at 6 A / 10% duty.
+- Estimate CP high/low from averages of the 16 highest/lowest raw samples rather than a single extreme.
+- Convert only the robust raw extrema to calibrated mV via `adc_cali_raw_to_voltage()`.
+- Add ADC acquisition supervision and a dedicated ADC fault.
+- Add `cp_confirm_windows` consecutive-window validation for physical CP state changes.
+- Add optional ADC sample-count and read-error diagnostics under `timing_debug`.
+- Update example thresholds for the assembled 500k / 100k / 100k feedback network.
+
 ## v0.4.1
 
 - Add `timing_debug` switch for development-only EVSE task instrumentation.

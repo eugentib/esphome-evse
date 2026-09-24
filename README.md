@@ -2,10 +2,34 @@
 
 Experimental IEC 61851 / SAE J1772 basic-signaling EVSE controller implemented as an ESPHome external component.
 
-**Current version: v0.4.1**  
+**Current version: v0.4.2**  
 **Target:** classic dual-core ESP32 / ESP32 Relay X2, single phase, fixed Type 2 cable.
 
 > Experimental DIY EVSE firmware. It is not a certified safety controller. Mains protection, residual-current protection, PE integrity, contactor supervision, thermal protection and the analog CP interface remain hardware responsibilities and must be engineered/tested independently.
+
+## v0.4.2 CP acquisition
+
+v0.4.2 replaces the one-shot `analogReadMilliVolts()` peak search with the ESP-IDF continuous ADC/DMA driver on ADC1/GPIO34. This fixes aliasing observed at low CP PWM duty cycles.
+
+Default acquisition parameters:
+
+```yaml
+adc_sample_rate: 80000
+adc_peak_samples: 16
+adc_min_samples: 200
+adc_fault_time: 100ms
+cp_confirm_windows: 3
+```
+
+At 80 kS/s a 1 kHz CP period contains about 80 ADC samples. Even at the IEC minimum 10% duty cycle (6 A), the 100 us positive pulse contains about 8 samples per PWM period. The control task drains roughly 20 periods of DMA data every 20 ms.
+
+Instead of trusting a single maximum/minimum sample, v0.4.2 keeps the 16 highest and 16 lowest raw readings and averages each group. Only those two values are converted to calibrated millivolts with the ESP-IDF ADC calibration driver. This rejects isolated spikes while preserving the short positive CP plateau.
+
+An ADC acquisition failure lasting `adc_fault_time` raises a dedicated EVSE fault and prevents energization. Physical CP state changes also require at least `cp_confirm_windows` consecutive acquisition windows in addition to `stable_time`.
+
+With `timing_debug: true`, two additional diagnostics can be exposed: `ADC Samples Last Cycle` and cumulative `ADC Read Errors`.
+
+The supplied example is calibrated for the assembled feedback network R9=500 kΩ, R10=100 kΩ, R11=100 kΩ.
 
 ## v0.4.1 timing diagnostics
 
@@ -117,7 +141,7 @@ ESPHome main loop
   -> entity publication only
 ```
 
-The task uses `vTaskDelayUntil()` for periodic execution. The default control period is 20 ms and the ADC acquisition window is 3 ms.
+The task uses `vTaskDelayUntil()` for periodic execution. The default control period is 20 ms. In v0.4.2 the ADC runs continuously in DMA mode between task executions; the task drains and evaluates the accumulated waveform samples each cycle.
 
 ## GitHub install
 
@@ -130,11 +154,11 @@ external_components:
     refresh: 1min
 ```
 
-After tagging v0.4.1:
+After tagging v0.4.2:
 
 ```yaml
 external_components:
-  - source: github://eugentib/esphome-evse@v0.4.1
+  - source: github://eugentib/esphome-evse@v0.4.2
     components: [evse]
     refresh: never
 ```
@@ -179,10 +203,10 @@ The EVSE control path remains in its own pinned FreeRTOS task.
 
 ## CP feedback hardware
 
-The v0.4.x defaults assume:
+The v0.4.2 example assumes:
 
 ```text
-CP ---- 470k ----+
+CP ---- 500k ----+
                  |
 3.3V -- 100k ----+---- 1k ---- GPIO34
                  |               |
@@ -195,7 +219,7 @@ Use correctly oriented rail clamps at the ADC pin. The ESP32 pin must never be e
 
 Because the offset is derived from the board's 3.3 V rail and resistor tolerances are finite, final bench verification remains required even though the ESP32 ADC conversion itself is calibrated to millivolts.
 
-## Safety items still outside v0.4.1
+## Safety items still outside v0.4.2
 
 Before real charging, add and test at least:
 

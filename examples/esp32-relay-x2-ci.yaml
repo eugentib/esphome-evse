@@ -96,9 +96,8 @@ evse:
   id: evse_controller
   pilot_output: cp_pwm
   pilot_adc_pin: GPIO34
-  # v0.4.1 uses ADC_11db and analogReadMilliVolts() for calibrated mV.
 
-  # v0.4.1 controls the onboard relay directly from the dedicated EVSE task.
+  # v0.4.2 controls the onboard relay directly from the dedicated EVSE task.
   # On ESP32 Relay X2, relay 1 is GPIO16. It must drive only an EXTERNAL
   # contactor coil, never the EV charging current itself.
   contactor_pin: GPIO16
@@ -110,7 +109,13 @@ evse:
   # The dedicated FreeRTOS task samples and executes the state machine every
   # 20 ms. GPIO34 is ADC1, so BLE/Wi-Fi do not create the ADC2 conflict.
   sample_interval: 20ms
-  sample_window_us: 3000
+  # Continuous ADC/DMA: 80 samples per 1 kHz CP period. At 6 A / 10% duty
+  # there are about 8 samples in every positive 100 us pulse.
+  adc_sample_rate: 80000
+  adc_peak_samples: 16
+  adc_min_samples: 200
+  adc_fault_time: 100ms
+  cp_confirm_windows: 3
   stable_time: 250ms
   contactor_close_delay: 1ms
   graceful_stop_timeout: 6s
@@ -129,29 +134,29 @@ evse:
   # instantiated/published.
   timing_debug: true
 
-  # Initial calibrated windows for the CP feedback network:
-  #   R9  = 470 kΩ from CP
+  # Calibrated windows for the assembled CP feedback network:
+  #   R9  = 500 kΩ from CP
   #   R10 = 100 kΩ to 3.3 V
   #   R11 = 100 kΩ to GND
   #
-  # Theoretical transfer:
-  #   Vadc[mV] ~= 1491.35 + 96.154 * Vcp[V]
+  # Approximate transfer at 3.3 V:
+  #   Vadc[V] ~= 1.500 + Vcp/11
   #
   # IEC/J1772 nominal windows represented here:
   #   A: +11...+13 V, B: +8...+10 V,
   #   C: +5...+7 V,  D: +2...+4 V.
-  state_a_min_mv: 2550
-  state_a_max_mv: 2745
-  state_b_min_mv: 2260
-  state_b_max_mv: 2455
-  state_c_min_mv: 1970
-  state_c_max_mv: 2170
-  state_d_min_mv: 1680
-  state_d_max_mv: 1880
+  state_a_min_mv: 2480
+  state_a_max_mv: 2700
+  state_b_min_mv: 2210
+  state_b_max_mv: 2430
+  state_c_min_mv: 1935
+  state_c_max_mv: 2160
+  state_d_min_mv: 1660
+  state_d_max_mv: 1885
 
-  # Valid negative half-cycle: approximately -13...-11 V.
-  diode_min_mv: 240
-  diode_max_mv: 435
+  # Valid negative half-cycle, calibrated for the actual -12 V rail.
+  diode_min_mv: 300
+  diode_max_mv: 520
 
   state:
     name: "EVSE State"
@@ -178,6 +183,10 @@ evse:
     name: "EVSE Task Max Lateness"
   task_missed_deadlines:
     name: "EVSE Task Missed Deadlines"
+  adc_sample_count:
+    name: "EVSE ADC Samples Last Cycle"
+  adc_read_errors:
+    name: "EVSE ADC Read Errors"
   vehicle_connected:
     name: "EVSE Vehicle Connected"
   charging:

@@ -11,12 +11,12 @@ static const char *const TAG = "evse";
 
 void EVSEComponent::setup() {
 #ifndef USE_ESP32
-  ESP_LOGE(TAG, "v0.4.1 requires ESP32");
+  ESP_LOGE(TAG, "v0.4.2 requires ESP32");
   mark_failed();
   return;
 #else
 #ifndef USE_ARDUINO
-  ESP_LOGE(TAG, "v0.4.1 currently requires the Arduino framework");
+  ESP_LOGE(TAG, "v0.4.2 currently requires the Arduino framework");
   mark_failed();
   return;
 #else
@@ -28,8 +28,15 @@ void EVSEComponent::setup() {
 
   pilot_adc_pin_->setup();
   pilot_adc_gpio_num_ = pilot_adc_pin_->get_pin();
-  analogReadResolution(12);
-  analogSetPinAttenuation(pilot_adc_gpio_num_, ADC_11db);
+
+  if (!setup_adc_dma_()) {
+    ESP_LOGE(TAG, "Failed to initialize continuous ADC/DMA on GPIO%u", pilot_adc_gpio_num_);
+    contactor_pin_->setup();
+    contactor_pin_->digital_write(false);
+    pilot_output_->set_level(0.0f);
+    mark_failed();
+    return;
+  }
 
   contactor_pin_->setup();
   contactor_pin_->digital_write(false);
@@ -62,13 +69,15 @@ void EVSEComponent::setup() {
   if (rc != pdPASS) {
     ESP_LOGE(TAG, "Failed to create EVSE FreeRTOS task");
     contactor_pin_->digital_write(false);
+    pilot_output_->set_level(0.0f);
+    shutdown_adc_dma_();
     mark_failed();
     return;
   }
 
   ESP_LOGI(
       TAG,
-      "EVSE v0.4.1 initialized; ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
+      "EVSE v0.4.2 initialized; ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
       pilot_adc_gpio_num_,
       task_core_,
       task_priority_,
@@ -79,7 +88,7 @@ void EVSEComponent::setup() {
 }
 
 void EVSEComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.1:");
+  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.2:");
   LOG_PIN("  Pilot ADC Pin: ", pilot_adc_pin_);
   LOG_PIN("  Contactor Pin: ", contactor_pin_);
   ESP_LOGCONFIG(TAG, "  Max/default current: %.1f / %.1f A", max_current_, default_current_);
@@ -87,7 +96,12 @@ void EVSEComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  EVSE task: core=%u priority=%u stack=%" PRIu32 " B", task_core_, task_priority_, task_stack_size_);
   ESP_LOGCONFIG(TAG, "  Timing debug: %s", YESNO(timing_debug_));
   ESP_LOGCONFIG(TAG, "  Task/sample interval: %" PRIu32 " ms", sample_interval_ms_);
-  ESP_LOGCONFIG(TAG, "  ADC sample window: %" PRIu32 " us", sample_window_us_);
+  ESP_LOGCONFIG(TAG, "  ADC mode: continuous DMA");
+  ESP_LOGCONFIG(TAG, "  ADC sample rate: %" PRIu32 " samples/s", adc_sample_rate_hz_);
+  ESP_LOGCONFIG(TAG, "  ADC peak averaging: %u samples", adc_peak_samples_);
+  ESP_LOGCONFIG(TAG, "  ADC minimum samples/cycle: %u", adc_min_samples_);
+  ESP_LOGCONFIG(TAG, "  ADC fault time: %" PRIu32 " ms", adc_fault_time_ms_);
+  ESP_LOGCONFIG(TAG, "  CP confirmation windows: %u", cp_confirm_windows_);
   ESP_LOGCONFIG(TAG, "  Stable CP time: %" PRIu32 " ms", stable_time_ms_);
   ESP_LOGCONFIG(TAG, "  Graceful stop timeout: %" PRIu32 " ms", graceful_stop_timeout_ms_);
   ESP_LOGCONFIG(TAG, "  Fault retry time: %" PRIu32 " ms", fault_retry_time_ms_);
@@ -115,6 +129,9 @@ void EVSEComponent::on_shutdown() {
     contactor_pin_->digital_write(false);
   if (pilot_output_ != nullptr)
     pilot_output_->set_level(0.0f);  // external CP driver -> -12 V fail-safe
+#ifdef USE_ESP32
+  shutdown_adc_dma_();
+#endif
 }
 
 void EVSEComponent::set_enabled(bool enabled) {
@@ -237,6 +254,7 @@ void EVSEComponent::task_loop_() {
 
     process_requests_();
     sample_cp_();
+    update_adc_supervision_(now);
     update_stable_cp_(sampled_cp_, now);
     update_diode_supervision_(now);
     control_(now);
@@ -267,6 +285,103 @@ void EVSEComponent::task_loop_() {
 
     update_snapshot_(now);
     vTaskDelayUntil(&last_wake, period_ticks);
+  }
+}
+#endif
+
+#ifdef USE_ESP32
+bool EVSEComponent::setup_adc_dma_() {
+  adc_unit_t unit = ADC_UNIT_1;
+  adc_channel_t channel = ADC_CHANNEL_0;
+  esp_err_t err = adc_continuous_io_to_channel(pilot_adc_gpio_num_, &unit, &channel);
+  if (err != ESP_OK || unit != ADC_UNIT_1) {
+    ESP_LOGE(TAG, "GPIO%u is not an ADC1 channel (%s)", pilot_adc_gpio_num_, esp_err_to_name(err));
+    return false;
+  }
+  adc_channel_ = channel;
+
+  adc_continuous_handle_cfg_t handle_cfg = {};
+  handle_cfg.max_store_buf_size = 8192;
+  handle_cfg.conv_frame_size = 256;
+  handle_cfg.flags.flush_pool = 1;
+  err = adc_continuous_new_handle(&handle_cfg, &adc_dma_handle_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "adc_continuous_new_handle failed: %s", esp_err_to_name(err));
+    adc_dma_handle_ = nullptr;
+    return false;
+  }
+
+  adc_digi_pattern_config_t pattern = {};
+  pattern.atten = ADC_ATTEN_DB_12;
+  pattern.channel = static_cast<uint8_t>(adc_channel_) & 0x7;
+  pattern.unit = ADC_UNIT_1;
+  pattern.bit_width = SOC_ADC_DIGI_MAX_BITWIDTH;
+
+  adc_continuous_config_t cfg = {};
+  cfg.sample_freq_hz = adc_sample_rate_hz_;
+  cfg.conv_mode = ADC_CONV_SINGLE_UNIT_1;
+  cfg.pattern_num = 1;
+  cfg.adc_pattern = &pattern;
+
+  err = adc_continuous_config(adc_dma_handle_, &cfg);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "adc_continuous_config failed: %s", esp_err_to_name(err));
+    shutdown_adc_dma_();
+    return false;
+  }
+
+  adc_cali_line_fitting_config_t cali_cfg = {};
+  cali_cfg.unit_id = ADC_UNIT_1;
+  cali_cfg.atten = ADC_ATTEN_DB_12;
+  cali_cfg.bitwidth = ADC_BITWIDTH_12;
+  cali_cfg.default_vref = 0;
+  err = adc_cali_create_scheme_line_fitting(&cali_cfg, &adc_cali_handle_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "ADC calibration init failed: %s", esp_err_to_name(err));
+    shutdown_adc_dma_();
+    return false;
+  }
+
+  err = adc_continuous_start(adc_dma_handle_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "adc_continuous_start failed: %s", esp_err_to_name(err));
+    shutdown_adc_dma_();
+    return false;
+  }
+
+  ESP_LOGI(TAG, "ADC DMA: GPIO%u ADC1_CH%u at %" PRIu32 " samples/s", pilot_adc_gpio_num_,
+           static_cast<unsigned>(adc_channel_), adc_sample_rate_hz_);
+  return true;
+}
+
+void EVSEComponent::shutdown_adc_dma_() {
+  if (adc_dma_handle_ != nullptr) {
+    adc_continuous_stop(adc_dma_handle_);
+    adc_continuous_deinit(adc_dma_handle_);
+    adc_dma_handle_ = nullptr;
+  }
+  if (adc_cali_handle_ != nullptr) {
+    adc_cali_delete_scheme_line_fitting(adc_cali_handle_);
+    adc_cali_handle_ = nullptr;
+  }
+}
+
+void EVSEComponent::flush_adc_dma_() {
+  if (adc_dma_handle_ == nullptr)
+    return;
+
+  // Discard samples acquired under the previous pilot mode so a +12/PWM/-12
+  // transition cannot contaminate the next CP decision window.
+  for (uint8_t pass = 0; pass < 8; pass++) {
+    uint32_t bytes_read = 0;
+    const esp_err_t err = adc_continuous_read(adc_dma_handle_, adc_read_buffer_,
+                                               sizeof(adc_read_buffer_), &bytes_read, 0);
+    if (err == ESP_ERR_TIMEOUT)
+      break;
+    if (err != ESP_OK) {
+      adc_read_errors_++;
+      break;
+    }
   }
 }
 #endif
@@ -330,31 +445,122 @@ bool EVSEComponent::mv_in_window_(uint16_t v, uint16_t lo, uint16_t hi) const {
 }
 
 void EVSEComponent::sample_cp_() {
-#ifdef USE_ARDUINO
-  uint32_t low_mv = UINT32_MAX;
-  uint32_t high_mv = 0;
-  const uint32_t start = micros();
+#ifdef USE_ESP32
+  static constexpr uint8_t MAX_PEAK_SAMPLES = 32;
+  uint16_t top[MAX_PEAK_SAMPLES] = {};
+  uint16_t bottom[MAX_PEAK_SAMPLES];
+  for (uint8_t i = 0; i < MAX_PEAK_SAMPLES; i++)
+    bottom[i] = UINT16_MAX;
 
-  // analogReadMilliVolts() uses the Arduino-ESP32 calibrated one-shot ADC
-  // conversion. The window is deliberately > 2 CP periods so the 10% positive
-  // pulse at the 6 A minimum current is sampled reliably.
-  while ((uint32_t) (micros() - start) < sample_window_us_) {
-    const uint32_t sample_mv = analogReadMilliVolts(pilot_adc_gpio_num_);
-    if (sample_mv < low_mv)
-      low_mv = sample_mv;
-    if (sample_mv > high_mv)
-      high_mv = sample_mv;
+  uint32_t sample_count = 0;
+  uint8_t top_count = 0;
+  uint8_t bottom_count = 0;
+  bool read_error = false;
+
+  // Drain the DMA pool accumulated since the previous 20 ms control cycle.
+  // At 80 kS/s this normally yields ~1600 samples / 20 PWM periods. The pool
+  // is configured to flush old data on overflow so a delayed task always
+  // evaluates the newest CP waveform rather than stale samples.
+  for (uint8_t read_pass = 0; read_pass < 8; read_pass++) {
+    uint32_t bytes_read = 0;
+    const esp_err_t err = adc_continuous_read(adc_dma_handle_, adc_read_buffer_,
+                                               sizeof(adc_read_buffer_), &bytes_read, 0);
+    if (err == ESP_ERR_TIMEOUT)
+      break;
+    if (err != ESP_OK) {
+      adc_read_errors_++;
+      read_error = true;
+      break;
+    }
+
+    for (uint32_t i = 0; i + SOC_ADC_DIGI_RESULT_BYTES <= bytes_read; i += SOC_ADC_DIGI_RESULT_BYTES) {
+      const auto *p = reinterpret_cast<const adc_digi_output_data_t *>(&adc_read_buffer_[i]);
+      const uint8_t channel = p->type1.channel;
+      const uint16_t raw = p->type1.data;
+      if (channel != static_cast<uint8_t>(adc_channel_))
+        continue;
+
+      sample_count++;
+
+      // Keep the N largest raw readings. Averaging several plateau samples
+      // rejects single-sample spikes while still preserving the 100 us
+      // positive pulse at the IEC minimum 10% duty cycle.
+      uint8_t limit = adc_peak_samples_ < MAX_PEAK_SAMPLES ? adc_peak_samples_ : MAX_PEAK_SAMPLES;
+      for (uint8_t pos = 0; pos < limit; pos++) {
+        if (pos >= top_count || raw > top[pos]) {
+          uint8_t shift_end = top_count < limit ? top_count : static_cast<uint8_t>(limit - 1);
+          for (uint8_t j = shift_end; j > pos; j--)
+            top[j] = top[j - 1];
+          top[pos] = raw;
+          if (top_count < limit) top_count++;
+          break;
+        }
+      }
+
+      // Keep the N smallest readings for the negative half-cycle / diode test.
+      for (uint8_t pos = 0; pos < limit; pos++) {
+        if (pos >= bottom_count || raw < bottom[pos]) {
+          uint8_t shift_end = bottom_count < limit ? bottom_count : static_cast<uint8_t>(limit - 1);
+          for (uint8_t j = shift_end; j > pos; j--)
+            bottom[j] = bottom[j - 1];
+          bottom[pos] = raw;
+          if (bottom_count < limit) bottom_count++;
+          break;
+        }
+      }
+    }
   }
 
-  if (low_mv == UINT32_MAX)
-    low_mv = 0;
+  adc_last_sample_count_ = sample_count;
+  if (read_error || sample_count < adc_min_samples_ || top_count == 0 || bottom_count == 0) {
+    adc_sample_valid_ = false;
+    sampled_cp_ = CpLevel::UNKNOWN;
+    diode_sample_valid_ = false;
+    return;
+  }
 
-  cp_high_mv_ = static_cast<uint16_t>(high_mv > 65535U ? 65535U : high_mv);
-  cp_low_mv_ = static_cast<uint16_t>(low_mv > 65535U ? 65535U : low_mv);
+  uint32_t top_sum = 0;
+  uint32_t bottom_sum = 0;
+  for (uint8_t i = 0; i < top_count; i++) top_sum += top[i];
+  for (uint8_t i = 0; i < bottom_count; i++) bottom_sum += bottom[i];
+  const int high_raw = static_cast<int>((top_sum + top_count / 2U) / top_count);
+  const int low_raw = static_cast<int>((bottom_sum + bottom_count / 2U) / bottom_count);
+
+  int high_mv = 0;
+  int low_mv = 0;
+  if (adc_cali_raw_to_voltage(adc_cali_handle_, high_raw, &high_mv) != ESP_OK ||
+      adc_cali_raw_to_voltage(adc_cali_handle_, low_raw, &low_mv) != ESP_OK) {
+    adc_read_errors_++;
+    adc_sample_valid_ = false;
+    sampled_cp_ = CpLevel::UNKNOWN;
+    diode_sample_valid_ = false;
+    return;
+  }
+
+  if (high_mv < 0) high_mv = 0;
+  if (low_mv < 0) low_mv = 0;
+  cp_high_mv_ = static_cast<uint16_t>(high_mv > 65535 ? 65535 : high_mv);
+  cp_low_mv_ = static_cast<uint16_t>(low_mv > 65535 ? 65535 : low_mv);
+  adc_sample_valid_ = true;
   sampled_cp_ = classify_cp_(cp_high_mv_);
   diode_sample_valid_ =
       pilot_mode_ != PilotMode::PWM || mv_in_window_(cp_low_mv_, diode_min_mv_, diode_max_mv_);
 #endif
+}
+
+void EVSEComponent::update_adc_supervision_(uint32_t now) {
+  if (adc_sample_valid_) {
+    adc_invalid_since_ms_ = 0;
+    return;
+  }
+
+  if (adc_invalid_since_ms_ == 0) {
+    adc_invalid_since_ms_ = now;
+    return;
+  }
+
+  if ((uint32_t) (now - adc_invalid_since_ms_) >= adc_fault_time_ms_)
+    raise_fault_(FaultCode::ADC_FAULT);
 }
 
 CpLevel EVSEComponent::classify_cp_(uint16_t high_mv) const {
@@ -370,15 +576,30 @@ CpLevel EVSEComponent::classify_cp_(uint16_t high_mv) const {
 }
 
 void EVSEComponent::update_stable_cp_(CpLevel sampled, uint32_t now) {
-  if (sampled != candidate_cp_) {
-    candidate_cp_ = sampled;
+  // ADC acquisition faults are supervised separately. Do not allow an empty
+  // DMA window to become a physical CP state candidate.
+  if (sampled == CpLevel::UNKNOWN) {
+    candidate_cp_ = CpLevel::UNKNOWN;
+    candidate_windows_ = 0;
     candidate_since_ms_ = now;
     return;
   }
 
-  if (sampled != stable_cp_ && (uint32_t) (now - candidate_since_ms_) >= stable_time_ms_) {
+  if (sampled != candidate_cp_) {
+    candidate_cp_ = sampled;
+    candidate_since_ms_ = now;
+    candidate_windows_ = 1;
+    return;
+  }
+
+  if (candidate_windows_ < 255)
+    candidate_windows_++;
+
+  if (sampled != stable_cp_ && candidate_windows_ >= cp_confirm_windows_ &&
+      (uint32_t) (now - candidate_since_ms_) >= stable_time_ms_) {
     stable_cp_ = sampled;
-    ESP_LOGI(TAG, "Stable CP -> %s (high=%u mV low=%u mV)", cp_level_to_string_(stable_cp_), cp_high_mv_, cp_low_mv_);
+    ESP_LOGI(TAG, "Stable CP -> %s after %u windows (high=%u mV low=%u mV)",
+             cp_level_to_string_(stable_cp_), candidate_windows_, cp_high_mv_, cp_low_mv_);
   }
 }
 
@@ -464,6 +685,7 @@ void EVSEComponent::control_(uint32_t now) {
   if (state_ == EvseState::F) {
     stable_cp_ = CpLevel::UNKNOWN;
     candidate_cp_ = CpLevel::UNKNOWN;
+    candidate_windows_ = 0;
     enter_state_(EvseState::A, now);
     return;
   }
@@ -582,6 +804,9 @@ void EVSEComponent::set_pilot_mode_(PilotMode mode) {
 
   pilot_mode_ = mode;
   apply_pilot_output_();
+#ifdef USE_ESP32
+  flush_adc_dma_();
+#endif
 
   const char *name = mode == PilotMode::POSITIVE_DC ? "+12 V DC" :
                      mode == PilotMode::PWM ? "1 kHz PWM" : "-12 V DC";
@@ -646,6 +871,8 @@ void EVSEComponent::clear_fault_(uint32_t now) {
   diode_valid_ = true;
   stable_cp_ = CpLevel::UNKNOWN;
   candidate_cp_ = CpLevel::UNKNOWN;
+  candidate_windows_ = 0;
+  adc_invalid_since_ms_ = 0;
 
   if (!available_)
     enter_state_(EvseState::F, now);
@@ -685,6 +912,7 @@ const char *EVSEComponent::fault_to_string_(FaultCode code) const {
     case FaultCode::PILOT_VOLTAGE: return "CP voltage outside valid A/B/C/D windows";
     case FaultCode::PILOT_TRANSITION: return "Invalid CP transition for current EVSE state";
     case FaultCode::DIODE_FAULT: return "CP diode check failed";
+    case FaultCode::ADC_FAULT: return "CP ADC/DMA acquisition failed";
     default: return "Unknown fault";
   }
 }
@@ -708,6 +936,8 @@ void EVSEComponent::update_snapshot_(uint32_t heartbeat_ms) {
   snapshot_task_last_lateness_us_ = task_last_lateness_us_;
   snapshot_task_max_lateness_us_ = task_max_lateness_us_;
   snapshot_task_missed_deadlines_ = task_missed_deadlines_;
+  snapshot_adc_sample_count_ = adc_last_sample_count_;
+  snapshot_adc_read_errors_ = adc_read_errors_;
 #ifdef USE_ESP32
   portEXIT_CRITICAL(&data_mux_);
 #endif
@@ -729,6 +959,8 @@ void EVSEComponent::publish_() {
   uint32_t last_lateness_us;
   uint32_t max_lateness_us;
   uint32_t missed_deadlines;
+  uint32_t adc_sample_count;
+  uint32_t adc_read_errors;
 
 #ifdef USE_ESP32
   portENTER_CRITICAL(&data_mux_);
@@ -748,6 +980,8 @@ void EVSEComponent::publish_() {
   last_lateness_us = snapshot_task_last_lateness_us_;
   max_lateness_us = snapshot_task_max_lateness_us_;
   missed_deadlines = snapshot_task_missed_deadlines_;
+  adc_sample_count = snapshot_adc_sample_count_;
+  adc_read_errors = snapshot_adc_read_errors_;
 #ifdef USE_ESP32
   portEXIT_CRITICAL(&data_mux_);
 #endif
@@ -776,6 +1010,10 @@ void EVSEComponent::publish_() {
     task_max_lateness_sensor_->publish_state(max_lateness_us);
   if (task_missed_deadlines_sensor_ != nullptr)
     task_missed_deadlines_sensor_->publish_state(missed_deadlines);
+  if (adc_sample_count_sensor_ != nullptr)
+    adc_sample_count_sensor_->publish_state(adc_sample_count);
+  if (adc_read_errors_sensor_ != nullptr)
+    adc_read_errors_sensor_->publish_state(adc_read_errors);
 
   const bool connected = state == EvseState::B1 || state == EvseState::B2 ||
                          state == EvseState::C1 || state == EvseState::C2 ||

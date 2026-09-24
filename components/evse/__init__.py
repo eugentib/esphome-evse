@@ -15,7 +15,12 @@ CONF_MAX_CURRENT = "max_current"
 CONF_DEFAULT_CURRENT = "default_current"
 CONF_ALLOW_VENTILATION = "allow_ventilation"
 CONF_SAMPLE_INTERVAL = "sample_interval"
-CONF_SAMPLE_WINDOW_US = "sample_window_us"
+CONF_SAMPLE_WINDOW_US = "sample_window_us"  # legacy/accepted for v0.4.1 compatibility
+CONF_ADC_SAMPLE_RATE = "adc_sample_rate"
+CONF_ADC_PEAK_SAMPLES = "adc_peak_samples"
+CONF_ADC_MIN_SAMPLES = "adc_min_samples"
+CONF_ADC_FAULT_TIME = "adc_fault_time"
+CONF_CP_CONFIRM_WINDOWS = "cp_confirm_windows"
 CONF_STABLE_TIME = "stable_time"
 CONF_CONTACTOR_CLOSE_DELAY = "contactor_close_delay"
 CONF_GRACEFUL_STOP_TIMEOUT = "graceful_stop_timeout"
@@ -49,6 +54,8 @@ CONF_TASK_LAST_RUNTIME = "task_last_runtime"
 CONF_TASK_LAST_LATENESS = "task_last_lateness"
 CONF_TASK_MAX_LATENESS = "task_max_lateness"
 CONF_TASK_MISSED_DEADLINES = "task_missed_deadlines"
+CONF_ADC_SAMPLE_COUNT = "adc_sample_count"
+CONF_ADC_READ_ERRORS = "adc_read_errors"
 CONF_VEHICLE_CONNECTED = "vehicle_connected"
 CONF_CHARGING = "charging"
 CONF_STOPPING = "stopping"
@@ -71,7 +78,13 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_ALLOW_VENTILATION, default=False): cv.boolean,
 
     cv.Optional(CONF_SAMPLE_INTERVAL, default="20ms"): cv.positive_time_period_milliseconds,
+    # Legacy v0.4.1 option. Accepted but no longer used by the DMA sampler.
     cv.Optional(CONF_SAMPLE_WINDOW_US, default=3000): cv.int_range(min=1000, max=5000),
+    cv.Optional(CONF_ADC_SAMPLE_RATE, default=80000): cv.int_range(min=20000, max=200000),
+    cv.Optional(CONF_ADC_PEAK_SAMPLES, default=16): cv.int_range(min=1, max=32),
+    cv.Optional(CONF_ADC_MIN_SAMPLES, default=200): cv.int_range(min=32, max=4000),
+    cv.Optional(CONF_ADC_FAULT_TIME, default="100ms"): cv.positive_time_period_milliseconds,
+    cv.Optional(CONF_CP_CONFIRM_WINDOWS, default=3): cv.int_range(min=2, max=20),
     cv.Optional(CONF_STABLE_TIME, default="250ms"): cv.positive_time_period_milliseconds,
     cv.Optional(CONF_CONTACTOR_CLOSE_DELAY, default="1ms"): cv.positive_time_period_milliseconds,
     cv.Optional(CONF_GRACEFUL_STOP_TIMEOUT, default="6s"): cv.positive_time_period_milliseconds,
@@ -122,6 +135,12 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_TASK_MISSED_DEADLINES): sensor.sensor_schema(
         accuracy_decimals=0, icon="mdi:timer-off-outline"
     ),
+    cv.Optional(CONF_ADC_SAMPLE_COUNT): sensor.sensor_schema(
+        accuracy_decimals=0, icon="mdi:chart-bell-curve-cumulative"
+    ),
+    cv.Optional(CONF_ADC_READ_ERRORS): sensor.sensor_schema(
+        accuracy_decimals=0, icon="mdi:alert-circle-outline"
+    ),
     cv.Optional(CONF_VEHICLE_CONNECTED): binary_sensor.binary_sensor_schema(),
     cv.Optional(CONF_CHARGING): binary_sensor.binary_sensor_schema(),
     cv.Optional(CONF_STOPPING): binary_sensor.binary_sensor_schema(),
@@ -158,9 +177,13 @@ def _validate(config):
     if config[CONF_DIODE_MIN_MV] > config[CONF_DIODE_MAX_MV]:
         raise cv.Invalid("diode_min_mv must be <= diode_max_mv")
 
-    task_period_us = config[CONF_SAMPLE_INTERVAL].total_milliseconds * 1000
-    if config[CONF_SAMPLE_WINDOW_US] >= task_period_us:
-        raise cv.Invalid("sample_window_us must be shorter than sample_interval")
+    expected_samples = (config[CONF_ADC_SAMPLE_RATE] * config[CONF_SAMPLE_INTERVAL].total_milliseconds) // 1000
+    if config[CONF_ADC_MIN_SAMPLES] >= expected_samples:
+        raise cv.Invalid(
+            "adc_min_samples must be lower than the nominal samples collected per task interval"
+        )
+    if config[CONF_ADC_PEAK_SAMPLES] * 2 >= config[CONF_ADC_MIN_SAMPLES]:
+        raise cv.Invalid("adc_peak_samples is too large relative to adc_min_samples")
 
     return config
 
@@ -184,7 +207,12 @@ async def to_code(config):
     cg.add(var.set_allow_ventilation(config[CONF_ALLOW_VENTILATION]))
 
     cg.add(var.set_sample_interval(config[CONF_SAMPLE_INTERVAL].total_milliseconds))
-    cg.add(var.set_sample_window_us(config[CONF_SAMPLE_WINDOW_US]))
+    cg.add(var.set_sample_window_us(config[CONF_SAMPLE_WINDOW_US]))  # legacy, ignored by DMA sampler
+    cg.add(var.set_adc_sample_rate(config[CONF_ADC_SAMPLE_RATE]))
+    cg.add(var.set_adc_peak_samples(config[CONF_ADC_PEAK_SAMPLES]))
+    cg.add(var.set_adc_min_samples(config[CONF_ADC_MIN_SAMPLES]))
+    cg.add(var.set_adc_fault_time(config[CONF_ADC_FAULT_TIME].total_milliseconds))
+    cg.add(var.set_cp_confirm_windows(config[CONF_CP_CONFIRM_WINDOWS]))
     cg.add(var.set_stable_time(config[CONF_STABLE_TIME].total_milliseconds))
     cg.add(var.set_contactor_close_delay(config[CONF_CONTACTOR_CLOSE_DELAY].total_milliseconds))
     cg.add(var.set_graceful_stop_timeout(config[CONF_GRACEFUL_STOP_TIMEOUT].total_milliseconds))
@@ -202,6 +230,8 @@ async def to_code(config):
         CONF_TASK_LAST_LATENESS,
         CONF_TASK_MAX_LATENESS,
         CONF_TASK_MISSED_DEADLINES,
+        CONF_ADC_SAMPLE_COUNT,
+        CONF_ADC_READ_ERRORS,
     )
     if CONF_TIMING_DEBUG in config:
         timing_debug = config[CONF_TIMING_DEBUG]
@@ -259,6 +289,12 @@ async def to_code(config):
         if CONF_TASK_MISSED_DEADLINES in config:
             ent = await sensor.new_sensor(config[CONF_TASK_MISSED_DEADLINES])
             cg.add(var.set_task_missed_deadlines_sensor(ent))
+        if CONF_ADC_SAMPLE_COUNT in config:
+            ent = await sensor.new_sensor(config[CONF_ADC_SAMPLE_COUNT])
+            cg.add(var.set_adc_sample_count_sensor(ent))
+        if CONF_ADC_READ_ERRORS in config:
+            ent = await sensor.new_sensor(config[CONF_ADC_READ_ERRORS])
+            cg.add(var.set_adc_read_errors_sensor(ent))
     if CONF_VEHICLE_CONNECTED in config:
         ent = await binary_sensor.new_binary_sensor(config[CONF_VEHICLE_CONNECTED])
         cg.add(var.set_vehicle_connected_sensor(ent))

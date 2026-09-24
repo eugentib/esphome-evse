@@ -14,6 +14,11 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/portmacro.h>
+#include <esp_adc/adc_continuous.h>
+#include <esp_adc/adc_cali.h>
+#include <esp_adc/adc_cali_scheme.h>
+#include <soc/soc_caps.h>
+#include <esp_err.h>
 #endif
 
 namespace esphome {
@@ -27,6 +32,7 @@ enum class FaultCode : uint8_t {
   PILOT_VOLTAGE,
   PILOT_TRANSITION,
   DIODE_FAULT,
+  ADC_FAULT,
 };
 
 class EVSEComponent : public Component {
@@ -49,7 +55,12 @@ class EVSEComponent : public Component {
   void set_allow_ventilation(bool value) { allow_ventilation_ = value; }
 
   void set_sample_interval(uint32_t ms) { sample_interval_ms_ = ms; }
-  void set_sample_window_us(uint32_t us) { sample_window_us_ = us; }
+  void set_sample_window_us(uint32_t us) { sample_window_us_ = us; }  // legacy v0.4.1
+  void set_adc_sample_rate(uint32_t hz) { adc_sample_rate_hz_ = hz; }
+  void set_adc_peak_samples(uint8_t count) { adc_peak_samples_ = count; }
+  void set_adc_min_samples(uint16_t count) { adc_min_samples_ = count; }
+  void set_adc_fault_time(uint32_t ms) { adc_fault_time_ms_ = ms; }
+  void set_cp_confirm_windows(uint8_t count) { cp_confirm_windows_ = count; }
   void set_stable_time(uint32_t ms) { stable_time_ms_ = ms; }
   void set_contactor_close_delay(uint32_t ms) { contactor_close_delay_ms_ = ms; }
   void set_graceful_stop_timeout(uint32_t ms) { graceful_stop_timeout_ms_ = ms; }
@@ -84,6 +95,8 @@ class EVSEComponent : public Component {
   void set_task_last_lateness_sensor(sensor::Sensor *s) { task_last_lateness_sensor_ = s; }
   void set_task_max_lateness_sensor(sensor::Sensor *s) { task_max_lateness_sensor_ = s; }
   void set_task_missed_deadlines_sensor(sensor::Sensor *s) { task_missed_deadlines_sensor_ = s; }
+  void set_adc_sample_count_sensor(sensor::Sensor *s) { adc_sample_count_sensor_ = s; }
+  void set_adc_read_errors_sensor(sensor::Sensor *s) { adc_read_errors_sensor_ = s; }
   void set_vehicle_connected_sensor(binary_sensor::BinarySensor *s) { vehicle_connected_sensor_ = s; }
   void set_charging_sensor(binary_sensor::BinarySensor *s) { charging_sensor_ = s; }
   void set_stopping_sensor(binary_sensor::BinarySensor *s) { stopping_sensor_ = s; }
@@ -106,7 +119,13 @@ class EVSEComponent : public Component {
 #endif
 
   void process_requests_();
+#ifdef USE_ESP32
+  bool setup_adc_dma_();
+  void shutdown_adc_dma_();
+  void flush_adc_dma_();
+#endif
   void sample_cp_();
+  void update_adc_supervision_(uint32_t now);
   CpLevel classify_cp_(uint16_t high_mv) const;
   void update_stable_cp_(CpLevel sampled, uint32_t now);
   void update_diode_supervision_(uint32_t now);
@@ -151,6 +170,8 @@ class EVSEComponent : public Component {
   sensor::Sensor *task_last_lateness_sensor_{nullptr};
   sensor::Sensor *task_max_lateness_sensor_{nullptr};
   sensor::Sensor *task_missed_deadlines_sensor_{nullptr};
+  sensor::Sensor *adc_sample_count_sensor_{nullptr};
+  sensor::Sensor *adc_read_errors_sensor_{nullptr};
   binary_sensor::BinarySensor *vehicle_connected_sensor_{nullptr};
   binary_sensor::BinarySensor *charging_sensor_{nullptr};
   binary_sensor::BinarySensor *stopping_sensor_{nullptr};
@@ -163,7 +184,12 @@ class EVSEComponent : public Component {
   bool allow_ventilation_{false};
 
   uint32_t sample_interval_ms_{20};
-  uint32_t sample_window_us_{3000};
+  uint32_t sample_window_us_{3000};  // legacy v0.4.1; DMA sampler ignores it
+  uint32_t adc_sample_rate_hz_{80000};
+  uint8_t adc_peak_samples_{16};
+  uint16_t adc_min_samples_{200};
+  uint32_t adc_fault_time_ms_{100};
+  uint8_t cp_confirm_windows_{3};
   uint32_t stable_time_ms_{250};
   uint32_t contactor_close_delay_ms_{1};
   uint32_t graceful_stop_timeout_ms_{6000};
@@ -175,15 +201,19 @@ class EVSEComponent : public Component {
   uint32_t task_stack_size_{4096};
   bool timing_debug_{false};
 
-  uint16_t state_a_min_mv_{2550}, state_a_max_mv_{2745};
-  uint16_t state_b_min_mv_{2260}, state_b_max_mv_{2455};
-  uint16_t state_c_min_mv_{1970}, state_c_max_mv_{2170};
-  uint16_t state_d_min_mv_{1680}, state_d_max_mv_{1880};
-  uint16_t diode_min_mv_{240}, diode_max_mv_{435};
+  uint16_t state_a_min_mv_{2480}, state_a_max_mv_{2700};
+  uint16_t state_b_min_mv_{2210}, state_b_max_mv_{2430};
+  uint16_t state_c_min_mv_{1935}, state_c_max_mv_{2160};
+  uint16_t state_d_min_mv_{1660}, state_d_max_mv_{1885};
+  uint16_t diode_min_mv_{300}, diode_max_mv_{520};
 
 #ifdef USE_ESP32
   TaskHandle_t task_handle_{nullptr};
   mutable portMUX_TYPE data_mux_ = portMUX_INITIALIZER_UNLOCKED;
+  adc_continuous_handle_t adc_dma_handle_{nullptr};
+  adc_cali_handle_t adc_cali_handle_{nullptr};
+  adc_channel_t adc_channel_{ADC_CHANNEL_0};
+  alignas(4) uint8_t adc_read_buffer_[1024]{};
 #endif
 
   // Requests written by the ESPHome/main-loop side, consumed by the EVSE task.
@@ -200,6 +230,7 @@ class EVSEComponent : public Component {
   bool graceful_stop_active_{false};
   bool diode_sample_valid_{true};
   bool diode_valid_{true};
+  bool adc_sample_valid_{false};
 
   uint16_t cp_high_mv_{0};
   uint16_t cp_low_mv_{3300};
@@ -207,6 +238,7 @@ class EVSEComponent : public Component {
   CpLevel sampled_cp_{CpLevel::UNKNOWN};
   CpLevel candidate_cp_{CpLevel::UNKNOWN};
   CpLevel stable_cp_{CpLevel::UNKNOWN};
+  uint8_t candidate_windows_{0};
   EvseState state_{EvseState::A};
   PilotMode pilot_mode_{PilotMode::POSITIVE_DC};
   FaultCode fault_code_{FaultCode::NONE};
@@ -216,6 +248,9 @@ class EVSEComponent : public Component {
   uint32_t graceful_stop_started_ms_{0};
   uint32_t diode_invalid_since_ms_{0};
   uint32_t fault_since_ms_{0};
+  uint32_t adc_invalid_since_ms_{0};
+  uint32_t adc_last_sample_count_{0};
+  uint32_t adc_read_errors_{0};
   uint32_t task_late_cycles_{0};
   uint32_t task_last_runtime_us_{0};
   uint32_t task_max_runtime_us_{0};
@@ -239,6 +274,8 @@ class EVSEComponent : public Component {
   uint32_t snapshot_task_last_lateness_us_{0};
   uint32_t snapshot_task_max_lateness_us_{0};
   uint32_t snapshot_task_missed_deadlines_{0};
+  uint32_t snapshot_adc_sample_count_{0};
+  uint32_t snapshot_adc_read_errors_{0};
 
   uint32_t last_publish_ms_{0};
 };
