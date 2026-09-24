@@ -2,6 +2,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
 from esphome.components import sensor, binary_sensor, text_sensor
+from esphome.components.esp32 import include_builtin_idf_component
 from esphome.const import CONF_ID
 
 CODEOWNERS = []
@@ -198,6 +199,15 @@ CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, _validate)
 
 
 async def to_code(config):
+    # ESPHome excludes esp_adc from ESP-IDF builds unless a component explicitly
+    # requests it. This component includes esp_adc/adc_continuous.h and uses the
+    # ADC calibration driver, so it must be re-enabled for src/CMakeLists.txt.
+    include_builtin_idf_component("esp_adc")
+
+    # LEDC is normally already present, but request it explicitly because this
+    # component includes driver/ledc.h and owns the CP PWM peripheral directly.
+    include_builtin_idf_component("esp_driver_ledc")
+
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.4
+
+- Fix native ESP-IDF build dependency for `esp_adc/adc_continuous.h`.
+- Explicitly call `include_builtin_idf_component("esp_adc")`.
+- Explicitly request `esp_driver_ledc` for the native LEDC CP output.
+- No control-logic changes from v0.4.3.
+
 ## v0.4.3
 
 - Switch ESPHome example framework from Arduino to native ESP-IDF.

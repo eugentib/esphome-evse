@@ -2,11 +2,22 @@
 
 Experimental IEC 61851 / SAE J1772 basic-signaling EVSE controller implemented as an ESPHome external component.
 
-**Current version: v0.4.3**  
+**Current version: v0.4.4**  
 **Framework: native ESP-IDF**  
 **Target:** classic dual-core ESP32 / ESP32 Relay X2, single phase, fixed Type 2 cable.
 
 > Experimental DIY EVSE firmware. It is not a certified safety controller.
+
+## v0.4.4
+
+Build-system fix for native ESP-IDF:
+
+- explicitly re-enables ESP-IDF `esp_adc`, which ESPHome excludes by default;
+- explicitly requests `esp_driver_ledc` used by the native CP PWM path;
+- no EVSE state-machine, PWM-frequency or ADC-sampling behavior changes relative to v0.4.3.
+
+This fixes the ESP-IDF error reporting that `esp_adc/adc_continuous.h` is provided by
+`esp_adc` but that `esp_adc` is missing from the generated `src` component requirements.
 
 ## v0.4.3
 
@@ -107,7 +118,7 @@ After tagging v0.4.3:
 
 ```yaml
 external_components:
-  - source: github://eugentib/esphome-evse@v0.4.3
+  - source: github://eugentib/esphome-evse@v0.4.4
     components: [evse]
     refresh: never
 ```

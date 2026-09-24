@@ -7,7 +7,7 @@ static const char *const TAG = "evse";
 
 void EVSEComponent::setup() {
 #ifndef USE_ESP32
-  ESP_LOGE(TAG, "v0.4.3 requires ESP32");
+  ESP_LOGE(TAG, "v0.4.4 requires ESP32");
   mark_failed();
   return;
 #else
@@ -87,7 +87,7 @@ void EVSEComponent::setup() {
 
   ESP_LOGI(
       TAG,
-      "EVSE v0.4.3 initialized; PWM=GPIO%u ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
+      "EVSE v0.4.4 initialized; PWM=GPIO%u ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
       pilot_pwm_gpio_num_,
       pilot_adc_gpio_num_,
       task_core_,
@@ -98,7 +98,7 @@ void EVSEComponent::setup() {
 }
 
 void EVSEComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.3:");
+  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.4:");
   LOG_PIN("  Pilot PWM Pin: ", pilot_pwm_pin_);
   LOG_PIN("  Pilot ADC Pin: ", pilot_adc_pin_);
   LOG_PIN("  Contactor Pin: ", contactor_pin_);
