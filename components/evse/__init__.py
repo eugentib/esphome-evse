@@ -23,6 +23,7 @@ CONF_ADC_MIN_SAMPLES = "adc_min_samples"
 CONF_ADC_FAULT_TIME = "adc_fault_time"
 CONF_CP_CONFIRM_WINDOWS = "cp_confirm_windows"
 CONF_STABLE_TIME = "stable_time"
+CONF_INVALID_GRACE_TIME = "invalid_grace_time"
 CONF_CONTACTOR_CLOSE_DELAY = "contactor_close_delay"
 CONF_GRACEFUL_STOP_TIMEOUT = "graceful_stop_timeout"
 CONF_DIODE_FAULT_TIME = "diode_fault_time"
@@ -89,6 +90,7 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_ADC_FAULT_TIME, default="100ms"): cv.positive_time_period_milliseconds,
     cv.Optional(CONF_CP_CONFIRM_WINDOWS, default=3): cv.int_range(min=2, max=20),
     cv.Optional(CONF_STABLE_TIME, default="250ms"): cv.positive_time_period_milliseconds,
+    cv.Optional(CONF_INVALID_GRACE_TIME, default="100ms"): cv.positive_time_period_milliseconds,
     cv.Optional(CONF_CONTACTOR_CLOSE_DELAY, default="1ms"): cv.positive_time_period_milliseconds,
     cv.Optional(CONF_GRACEFUL_STOP_TIMEOUT, default="6s"): cv.positive_time_period_milliseconds,
     cv.Optional(CONF_DIODE_FAULT_TIME, default="100ms"): cv.positive_time_period_milliseconds,
@@ -230,6 +232,7 @@ async def to_code(config):
     cg.add(var.set_adc_fault_time(config[CONF_ADC_FAULT_TIME].total_milliseconds))
     cg.add(var.set_cp_confirm_windows(config[CONF_CP_CONFIRM_WINDOWS]))
     cg.add(var.set_stable_time(config[CONF_STABLE_TIME].total_milliseconds))
+    cg.add(var.set_invalid_grace_time(config[CONF_INVALID_GRACE_TIME].total_milliseconds))
     cg.add(var.set_contactor_close_delay(config[CONF_CONTACTOR_CLOSE_DELAY].total_milliseconds))
     cg.add(var.set_graceful_stop_timeout(config[CONF_GRACEFUL_STOP_TIMEOUT].total_milliseconds))
     cg.add(var.set_diode_fault_time(config[CONF_DIODE_FAULT_TIME].total_milliseconds))

@@ -7,7 +7,7 @@ static const char *const TAG = "evse";
 
 void EVSEComponent::setup() {
 #ifndef USE_ESP32
-  ESP_LOGE(TAG, "v0.4.4 requires ESP32");
+  ESP_LOGE(TAG, "v0.4.5 requires ESP32");
   mark_failed();
   return;
 #else
@@ -62,6 +62,7 @@ void EVSEComponent::setup() {
 
   const uint32_t now = now_ms_();
   candidate_since_ms_ = now;
+  invalid_since_ms_ = 0;
   state_entered_ms_ = now;
   update_snapshot_(now);
 
@@ -87,7 +88,7 @@ void EVSEComponent::setup() {
 
   ESP_LOGI(
       TAG,
-      "EVSE v0.4.4 initialized; PWM=GPIO%u ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
+      "EVSE v0.4.5 initialized; PWM=GPIO%u ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
       pilot_pwm_gpio_num_,
       pilot_adc_gpio_num_,
       task_core_,
@@ -98,7 +99,7 @@ void EVSEComponent::setup() {
 }
 
 void EVSEComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.4:");
+  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.5:");
   LOG_PIN("  Pilot PWM Pin: ", pilot_pwm_pin_);
   LOG_PIN("  Pilot ADC Pin: ", pilot_adc_pin_);
   LOG_PIN("  Contactor Pin: ", contactor_pin_);
@@ -115,6 +116,7 @@ void EVSEComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  ADC fault time: %" PRIu32 " ms", adc_fault_time_ms_);
   ESP_LOGCONFIG(TAG, "  CP confirmation windows: %u", cp_confirm_windows_);
   ESP_LOGCONFIG(TAG, "  Stable CP time: %" PRIu32 " ms", stable_time_ms_);
+  ESP_LOGCONFIG(TAG, "  Invalid CP grace time: %" PRIu32 " ms", invalid_grace_time_ms_);
   ESP_LOGCONFIG(TAG, "  Graceful stop timeout: %" PRIu32 " ms", graceful_stop_timeout_ms_);
   ESP_LOGCONFIG(TAG, "  Fault retry time: %" PRIu32 " ms", fault_retry_time_ms_);
   ESP_LOGCONFIG(TAG, "  A window: %u..%u mV", state_a_min_mv_, state_a_max_mv_);
@@ -740,7 +742,40 @@ void EVSEComponent::update_stable_cp_(CpLevel sampled, uint32_t now) {
     candidate_cp_ = CpLevel::UNKNOWN;
     candidate_windows_ = 0;
     candidate_since_ms_ = now;
+    invalid_since_ms_ = 0;
     return;
+  }
+
+  // A/B/C/D transitions physically cross intermediate voltages. Treat those
+  // INVALID samples as a short transition gap instead of promoting INVALID to
+  // a stable CP state. The last valid stable state is retained during the
+  // grace interval. A continuously invalid voltage still fails closed.
+  if (sampled == CpLevel::INVALID) {
+    candidate_cp_ = CpLevel::UNKNOWN;
+    candidate_windows_ = 0;
+    candidate_since_ms_ = now;
+
+    if (invalid_since_ms_ == 0) {
+      invalid_since_ms_ = now;
+      ESP_LOGD(TAG, "CP entered invalid transition gap (high=%u mV low=%u mV)",
+               cp_high_mv_, cp_low_mv_);
+      return;
+    }
+
+    if ((uint32_t) (now - invalid_since_ms_) >= invalid_grace_time_ms_) {
+      ESP_LOGW(TAG,
+               "CP remained invalid for %" PRIu32 " ms (high=%u mV low=%u mV)",
+               (uint32_t) (now - invalid_since_ms_), cp_high_mv_, cp_low_mv_);
+      raise_fault_(FaultCode::PILOT_VOLTAGE);
+    }
+    return;
+  }
+
+  // Any valid A/B/C/D sample immediately clears a transient invalid gap.
+  if (invalid_since_ms_ != 0) {
+    ESP_LOGD(TAG, "CP left invalid transition gap after %" PRIu32 " ms -> %s",
+             (uint32_t) (now - invalid_since_ms_), cp_level_to_string_(sampled));
+    invalid_since_ms_ = 0;
   }
 
   if (sampled != candidate_cp_) {
@@ -855,11 +890,6 @@ void EVSEComponent::control_(uint32_t now) {
 
   if (stable_cp_ == CpLevel::UNKNOWN) {
     service_state_actions_(now);
-    return;
-  }
-
-  if (stable_cp_ == CpLevel::INVALID) {
-    raise_fault_(FaultCode::PILOT_VOLTAGE);
     return;
   }
 
@@ -1047,6 +1077,7 @@ void EVSEComponent::clear_fault_(uint32_t now) {
   stable_cp_ = CpLevel::UNKNOWN;
   candidate_cp_ = CpLevel::UNKNOWN;
   candidate_windows_ = 0;
+  invalid_since_ms_ = 0;
   adc_invalid_since_ms_ = 0;
 
   if (!available_)

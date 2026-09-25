@@ -64,6 +64,7 @@ class EVSEComponent : public Component {
   void set_adc_fault_time(uint32_t ms) { adc_fault_time_ms_ = ms; }
   void set_cp_confirm_windows(uint8_t count) { cp_confirm_windows_ = count; }
   void set_stable_time(uint32_t ms) { stable_time_ms_ = ms; }
+  void set_invalid_grace_time(uint32_t ms) { invalid_grace_time_ms_ = ms; }
   void set_contactor_close_delay(uint32_t ms) { contactor_close_delay_ms_ = ms; }
   void set_graceful_stop_timeout(uint32_t ms) { graceful_stop_timeout_ms_ = ms; }
   void set_diode_fault_time(uint32_t ms) { diode_fault_time_ms_ = ms; }
@@ -204,6 +205,7 @@ class EVSEComponent : public Component {
   uint32_t adc_fault_time_ms_{100};
   uint8_t cp_confirm_windows_{3};
   uint32_t stable_time_ms_{250};
+  uint32_t invalid_grace_time_ms_{100};
   uint32_t contactor_close_delay_ms_{1};
   uint32_t graceful_stop_timeout_ms_{6000};
   uint32_t diode_fault_time_ms_{100};
@@ -267,6 +269,7 @@ class EVSEComponent : public Component {
   FaultCode fault_code_{FaultCode::NONE};
 
   uint32_t candidate_since_ms_{0};
+  uint32_t invalid_since_ms_{0};
   uint32_t state_entered_ms_{0};
   uint32_t graceful_stop_started_ms_{0};
   uint32_t diode_invalid_since_ms_{0};

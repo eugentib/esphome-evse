@@ -2,11 +2,50 @@
 
 Experimental IEC 61851 / SAE J1772 basic-signaling EVSE controller implemented as an ESPHome external component.
 
-**Current version: v0.4.4**  
+**Current version: v0.4.5**  
 **Framework: native ESP-IDF**  
 **Target:** classic dual-core ESP32 / ESP32 Relay X2, single phase, fixed Type 2 cable.
 
 > Experimental DIY EVSE firmware. It is not a certified safety controller.
+
+## v0.4.5
+
+v0.4.5 changes how voltages between the valid A/B/C/D windows are handled.
+
+Normal physical transitions cross intermediate voltages. Those samples are now
+treated as a short transition gap rather than becoming a stable `Invalid` CP state.
+
+```yaml
+stable_time: 250ms
+invalid_grace_time: 100ms
+```
+
+Behavior:
+
+```text
+B -> Invalid for 20...80 ms -> A
+     ^ ignored transition gap
+
+B -> Invalid continuously for >=100 ms
+     ^ CP voltage fault
+```
+
+During the grace interval the last valid stable CP state is retained. Invalid
+samples reset any pending valid-state candidate, so a new A/B/C/D level still
+has to satisfy `cp_confirm_windows` and `stable_time`.
+
+ADC/DMA acquisition faults, diode supervision and CP output failures remain
+independent and are not hidden by `invalid_grace_time`.
+
+The supplied example keeps small invalid guard bands. In particular:
+
+```yaml
+state_b_max_mv: 2430
+state_a_min_mv: 2440
+```
+
+so a real intermediate voltage can still be recognized as abnormal if it
+persists, while a normal fast B/A transition does not trip the EVSE.
 
 ## v0.4.4
 
@@ -118,7 +157,7 @@ After tagging v0.4.3:
 
 ```yaml
 external_components:
-  - source: github://eugentib/esphome-evse@v0.4.4
+  - source: github://eugentib/esphome-evse@v0.4.5
     components: [evse]
     refresh: never
 ```

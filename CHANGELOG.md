@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.4.5
+
+- Add configurable `invalid_grace_time` (default 100 ms).
+- Intermediate CP voltages no longer become a stable `Invalid` state.
+- Hold the last valid CP state during a short invalid transition gap.
+- Clear the invalid timer immediately when A/B/C/D returns.
+- Raise `CP voltage outside valid A/B/C/D windows` only when invalid CP persists beyond the grace interval.
+- Reset pending valid-state confirmation when an invalid transition gap occurs.
+- Keep ADC/DMA, diode and CP-output faults independent from the invalid-voltage grace mechanism.
+- Set the example A/B guard band to 2430..2440 mV.
+
 ## v0.4.4
 
 - Fix native ESP-IDF build dependency for `esp_adc/adc_continuous.h`.

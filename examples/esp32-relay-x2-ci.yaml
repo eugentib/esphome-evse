@@ -93,7 +93,7 @@ evse:
   pilot_pwm_pin: GPIO25
   pilot_adc_pin: GPIO34
 
-  # v0.4.4 controls the onboard relay directly from the dedicated EVSE task.
+  # v0.4.5 controls the onboard relay directly from the dedicated EVSE task.
   # On ESP32 Relay X2, relay 1 is GPIO16. It must drive only an EXTERNAL
   # contactor coil, never the EV charging current itself.
   contactor_pin: GPIO16
@@ -113,6 +113,9 @@ evse:
   adc_fault_time: 100ms
   cp_confirm_windows: 3
   stable_time: 250ms
+  # Intermediate voltages crossed during normal A/B/C/D transitions are
+  # tolerated briefly. Only a continuously invalid CP voltage faults.
+  invalid_grace_time: 100ms
   contactor_close_delay: 1ms
   graceful_stop_timeout: 6s
   diode_fault_time: 100ms
@@ -141,7 +144,7 @@ evse:
   # IEC/J1772 nominal windows represented here:
   #   A: +11...+13 V, B: +8...+10 V,
   #   C: +5...+7 V,  D: +2...+4 V.
-  state_a_min_mv: 2480
+  state_a_min_mv: 2440
   state_a_max_mv: 2700
   state_b_min_mv: 2210
   state_b_max_mv: 2430
