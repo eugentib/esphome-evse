@@ -2,11 +2,31 @@
 
 Experimental IEC 61851 / SAE J1772 basic-signaling EVSE controller implemented as an ESPHome external component.
 
-**Current version: v0.4.8**  
+**Current version: v0.4.9**  
 **Framework: native ESP-IDF**  
 **Target:** classic dual-core ESP32 / ESP32 Relay X2, single phase, fixed Type 2 cable.
 
 > Experimental DIY EVSE firmware. It is not a certified safety controller.
+
+## v0.4.9
+
+### Fix v0.4.8 build error
+
+v0.4.8 referenced a non-existent `advertised_current_` member inside the OTA
+safe-output helper. v0.4.9 removes that invalid reference.
+
+Because the EVSE task is suspended during OTA, the safe-output helper also
+updates the safety-related Home Assistant snapshot directly:
+
+```text
+EVSE Advertised Current = 0 A
+EVSE Charging           = Off
+EVSE Graceful Stop      = Off
+EVSE Pilot Duty         = 0 %
+EVSE Pilot Mode         = -12 V DC
+```
+
+The OTA interlock introduced in v0.4.8 is otherwise unchanged.
 
 ## v0.4.8
 
@@ -246,7 +266,7 @@ After tagging v0.4.3:
 
 ```yaml
 external_components:
-  - source: github://eugentib/esphome-evse@v0.4.8
+  - source: github://eugentib/esphome-evse@v0.4.9
     components: [evse]
     refresh: never
 ```

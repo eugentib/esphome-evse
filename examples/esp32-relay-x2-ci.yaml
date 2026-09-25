@@ -100,7 +100,7 @@ evse:
   pilot_pwm_pin: GPIO25
   pilot_adc_pin: GPIO34
 
-  # v0.4.8 controls the onboard relay directly from the dedicated EVSE task.
+  # v0.4.9 controls the onboard relay directly from the dedicated EVSE task.
   # On ESP32 Relay X2, relay 1 is GPIO16. It must drive only an EXTERNAL
   # contactor coil, never the EV charging current itself.
   contactor_pin: GPIO16

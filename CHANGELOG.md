@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.4.9
+
+- Fix v0.4.8 compile failure caused by an invalid `advertised_current_` member reference.
+- Update safety-related HA snapshot values directly when OTA suspends the EVSE task.
+- Preserve the OTA lockout, immediate contactor-off and CP -12 V behavior.
+
 ## v0.4.8
 
 - Add native global OTA state listener integration.

@@ -7,7 +7,7 @@ static const char *const TAG = "evse";
 
 void EVSEComponent::setup() {
 #ifndef USE_ESP32
-  ESP_LOGE(TAG, "v0.4.8 requires ESP32");
+  ESP_LOGE(TAG, "v0.4.9 requires ESP32");
   mark_failed();
   return;
 #else
@@ -92,7 +92,7 @@ void EVSEComponent::setup() {
 
   ESP_LOGI(
       TAG,
-      "EVSE v0.4.8 initialized; PWM=GPIO%u ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
+      "EVSE v0.4.9 initialized; PWM=GPIO%u ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
       pilot_pwm_gpio_num_,
       pilot_adc_gpio_num_,
       task_core_,
@@ -103,7 +103,7 @@ void EVSEComponent::setup() {
 }
 
 void EVSEComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.8:");
+  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.9:");
   LOG_PIN("  Pilot PWM Pin: ", pilot_pwm_pin_);
   LOG_PIN("  Pilot ADC Pin: ", pilot_adc_pin_);
   LOG_PIN("  Contactor Pin: ", contactor_pin_);
@@ -1127,7 +1127,6 @@ void EVSEComponent::force_safe_outputs_() {
 
   contactor_on_ = false;
   graceful_stop_active_ = false;
-  advertised_current_ = 0.0f;
 
 #ifdef USE_ESP32
   if (pilot_hw_ok_)
@@ -1136,6 +1135,20 @@ void EVSEComponent::force_safe_outputs_() {
 
   pilot_mode_ = PilotMode::NEGATIVE_DC;
   pilot_duty_percent_ = 0.0f;
+
+  // The EVSE task is suspended during OTA, so update the externally visible
+  // safety-related snapshot here instead of waiting for update_snapshot_().
+#ifdef USE_ESP32
+  portENTER_CRITICAL(&data_mux_);
+#endif
+  snapshot_advertised_current_ = 0.0f;
+  snapshot_contactor_on_ = false;
+  snapshot_graceful_stop_ = false;
+  snapshot_pilot_duty_percent_ = 0.0f;
+  snapshot_pilot_mode_ = PilotMode::NEGATIVE_DC;
+#ifdef USE_ESP32
+  portEXIT_CRITICAL(&data_mux_);
+#endif
 }
 
 void EVSEComponent::open_contactor_() {
