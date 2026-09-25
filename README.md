@@ -2,11 +2,53 @@
 
 Experimental IEC 61851 / SAE J1772 basic-signaling EVSE controller implemented as an ESPHome external component.
 
-**Current version: v0.4.6**  
+**Current version: v0.4.7**  
 **Framework: native ESP-IDF**  
 **Target:** classic dual-core ESP32 / ESP32 Relay X2, single phase, fixed Type 2 cable.
 
 > Experimental DIY EVSE firmware. It is not a certified safety controller.
+
+## v0.4.7
+
+### LEDC log warning fix
+
+The native LEDC initialization log now uses `PRIu32` for the 32-bit frequency
+values, removing the ESP-IDF compiler warning about `%u` versus `uint32_t`.
+
+### Wi-Fi migration / provisioning
+
+The normal example now uses ESPHome's multi-network syntax and a fallback AP
+with captive portal:
+
+```yaml
+wifi:
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+
+    # Optional additional known network:
+    # - ssid: !secret wifi_ssid_2
+    #   password: !secret wifi_password_2
+
+  ap:
+    ssid: "${name}-setup"
+    password: !secret wifi_fallback_password
+
+captive_portal:
+```
+
+Add this to `secrets.yaml`:
+
+```yaml
+wifi_fallback_password: "choose-a-strong-password"
+```
+
+When no configured station network is reachable, ESPHome starts the fallback
+AP. Connecting to it opens a captive portal where a different Wi-Fi SSID and
+password can be entered and saved on the device.
+
+For permanent reproducible configuration, also add any long-term secondary
+network to the `networks:` list / `secrets.yaml`.
 
 ## v0.4.6
 
@@ -178,7 +220,7 @@ After tagging v0.4.3:
 
 ```yaml
 external_components:
-  - source: github://eugentib/esphome-evse@v0.4.6
+  - source: github://eugentib/esphome-evse@v0.4.7
     components: [evse]
     refresh: never
 ```

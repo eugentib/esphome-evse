@@ -17,8 +17,23 @@ ota:
   - platform: esphome
 
 wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
+  # ESPHome will connect to the best reachable configured network.
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+
+    # Optional second preconfigured network:
+    # - ssid: !secret wifi_ssid_2
+    #   password: !secret wifi_password_2
+
+  # If no configured network is reachable, expose a setup AP. The captive
+  # portal lets you enter and save credentials for another Wi-Fi network
+  # without rebuilding the firmware.
+  ap:
+    ssid: "${name}-setup"
+    password: !secret wifi_fallback_password
+
+captive_portal:
 
 # Bluetooth proxy is deliberately advertisement-only at first.
 # The EVSE control path runs in its own pinned FreeRTOS task, independent of
@@ -92,7 +107,7 @@ evse:
   pilot_pwm_pin: GPIO25
   pilot_adc_pin: GPIO34
 
-  # v0.4.6 controls the onboard relay directly from the dedicated EVSE task.
+  # v0.4.7 controls the onboard relay directly from the dedicated EVSE task.
   # On ESP32 Relay X2, relay 1 is GPIO16. It must drive only an EXTERNAL
   # contactor coil, never the EV charging current itself.
   contactor_pin: GPIO16

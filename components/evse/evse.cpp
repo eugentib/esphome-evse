@@ -7,7 +7,7 @@ static const char *const TAG = "evse";
 
 void EVSEComponent::setup() {
 #ifndef USE_ESP32
-  ESP_LOGE(TAG, "v0.4.6 requires ESP32");
+  ESP_LOGE(TAG, "v0.4.7 requires ESP32");
   mark_failed();
   return;
 #else
@@ -88,7 +88,7 @@ void EVSEComponent::setup() {
 
   ESP_LOGI(
       TAG,
-      "EVSE v0.4.6 initialized; PWM=GPIO%u ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
+      "EVSE v0.4.7 initialized; PWM=GPIO%u ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
       pilot_pwm_gpio_num_,
       pilot_adc_gpio_num_,
       task_core_,
@@ -99,7 +99,7 @@ void EVSEComponent::setup() {
 }
 
 void EVSEComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.6:");
+  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.7:");
   LOG_PIN("  Pilot PWM Pin: ", pilot_pwm_pin_);
   LOG_PIN("  Pilot ADC Pin: ", pilot_adc_pin_);
   LOG_PIN("  Contactor Pin: ", contactor_pin_);
@@ -363,8 +363,11 @@ bool EVSEComponent::setup_pilot_pwm_() {
   pilot_duty_percent_ = 100.0f;
 
   const uint32_t actual_hz = ledc_get_freq(PILOT_LEDC_MODE, PILOT_LEDC_TIMER);
-  ESP_LOGI(TAG, "Native LEDC CP initialized: GPIO%u, requested=%u Hz actual=%" PRIu32 " Hz",
-           pilot_pwm_gpio_num_, PILOT_PWM_HZ, actual_hz);
+  ESP_LOGI(TAG,
+           "Native LEDC CP initialized: GPIO%u, requested=%" PRIu32 " Hz actual=%" PRIu32 " Hz",
+           static_cast<unsigned int>(pilot_pwm_gpio_num_),
+           static_cast<uint32_t>(PILOT_PWM_HZ),
+           actual_hz);
   return actual_hz == PILOT_PWM_HZ;
 }
 

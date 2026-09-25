@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.7
+
+- Fix native LEDC initialization log format warning by using `PRIu32` for frequency values.
+- Switch the normal example to ESPHome `wifi.networks` syntax.
+- Add fallback Wi-Fi AP and `captive_portal` so credentials for a different network can be entered on-device.
+- Add commented example for a second preconfigured Wi-Fi network.
+- Update CI example to validate multi-network/fallback-AP configuration.
+
 ## v0.4.6
 
 - Fix current-limit changes while CP PWM is already active.
