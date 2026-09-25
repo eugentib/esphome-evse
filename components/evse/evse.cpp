@@ -7,7 +7,7 @@ static const char *const TAG = "evse";
 
 void EVSEComponent::setup() {
 #ifndef USE_ESP32
-  ESP_LOGE(TAG, "v0.4.7 requires ESP32");
+  ESP_LOGE(TAG, "v0.4.8 requires ESP32");
   mark_failed();
   return;
 #else
@@ -66,6 +66,10 @@ void EVSEComponent::setup() {
   state_entered_ms_ = now;
   update_snapshot_(now);
 
+#ifdef USE_OTA_STATE_LISTENER
+  ota::get_global_ota_callback()->add_global_state_listener(this);
+#endif
+
   const BaseType_t rc = xTaskCreatePinnedToCore(
       &EVSEComponent::task_entry_,
       "evse_ctrl",
@@ -88,7 +92,7 @@ void EVSEComponent::setup() {
 
   ESP_LOGI(
       TAG,
-      "EVSE v0.4.7 initialized; PWM=GPIO%u ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
+      "EVSE v0.4.8 initialized; PWM=GPIO%u ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
       pilot_pwm_gpio_num_,
       pilot_adc_gpio_num_,
       task_core_,
@@ -99,7 +103,7 @@ void EVSEComponent::setup() {
 }
 
 void EVSEComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.7:");
+  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.8:");
   LOG_PIN("  Pilot PWM Pin: ", pilot_pwm_pin_);
   LOG_PIN("  Pilot ADC Pin: ", pilot_adc_pin_);
   LOG_PIN("  Contactor Pin: ", contactor_pin_);
@@ -109,6 +113,7 @@ void EVSEComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Timing debug: %s", YESNO(timing_debug_));
   ESP_LOGCONFIG(TAG, "  Task/sample interval: %" PRIu32 " ms", sample_interval_ms_);
   ESP_LOGCONFIG(TAG, "  Pilot PWM: native ESP-IDF LEDC, 1 kHz");
+  ESP_LOGCONFIG(TAG, "  OTA safety interlock: enabled");
   ESP_LOGCONFIG(TAG, "  ADC mode: continuous DMA");
   ESP_LOGCONFIG(TAG, "  ADC sample rate: %" PRIu32 " samples/s", adc_sample_rate_hz_);
   ESP_LOGCONFIG(TAG, "  ADC peak averaging: %u samples", adc_peak_samples_);
@@ -135,19 +140,76 @@ void EVSEComponent::loop() {
 }
 
 void EVSEComponent::on_shutdown() {
+  ota_lockout_.store(true, std::memory_order_release);
 #ifdef USE_ESP32
   if (task_handle_ != nullptr)
     vTaskSuspend(task_handle_);
 #endif
-  if (contactor_pin_ != nullptr)
-    contactor_pin_->digital_write(false);
+  force_safe_outputs_();
 #ifdef USE_ESP32
-  // External CP driver mapping: logic LOW -> -12 V fail-safe.
-  set_pilot_static_(false);
   shutdown_adc_dma_();
   shutdown_pilot_pwm_();
 #endif
 }
+
+#ifdef USE_OTA_STATE_LISTENER
+void EVSEComponent::on_ota_global_state(ota::OTAState ota_state, float progress, uint8_t error,
+                                        ota::OTAComponent *component) {
+  (void) progress;
+  (void) error;
+  (void) component;
+
+  if (ota_state == ota::OTA_STARTED) {
+    // OTA can block the normal application loop. Enter the safe hardware state
+    // synchronously before the data transfer begins.
+    ota_lockout_.store(true, std::memory_order_release);
+
+#ifdef USE_ESP32
+    portENTER_CRITICAL(&data_mux_);
+    requested_enabled_ = false;
+    portEXIT_CRITICAL(&data_mux_);
+
+    if (task_handle_ != nullptr && !task_suspended_for_ota_) {
+      vTaskSuspend(task_handle_);
+      task_suspended_for_ota_ = true;
+    }
+#else
+    requested_enabled_ = false;
+#endif
+
+    force_safe_outputs_();
+    ESP_LOGW(TAG, "OTA started: contactor forced OFF, CP forced to -12 V, EVSE task suspended");
+    return;
+  }
+
+  if (ota_state == ota::OTA_ERROR || ota_state == ota::OTA_ABORT) {
+    // Never resume charging automatically after an interrupted update.
+#ifdef USE_ESP32
+    portENTER_CRITICAL(&data_mux_);
+    requested_enabled_ = false;
+    requested_available_ = true;
+    portEXIT_CRITICAL(&data_mux_);
+#else
+    requested_enabled_ = false;
+    requested_available_ = true;
+#endif
+
+    ota_lockout_.store(false, std::memory_order_release);
+
+#ifdef USE_ESP32
+    if (task_handle_ != nullptr && task_suspended_for_ota_) {
+      task_suspended_for_ota_ = false;
+      vTaskResume(task_handle_);
+    }
+#endif
+
+    ESP_LOGW(TAG, "OTA aborted/failed: EVSE task resumed with Enable forced OFF");
+    return;
+  }
+
+  // OTA_COMPLETED: remain safe and suspended until the imminent reboot.
+}
+#endif
 
 void EVSEComponent::set_enabled(bool enabled) {
 #ifdef USE_ESP32
@@ -877,6 +939,11 @@ EvseState EVSEComponent::target_state_for_cp_(CpLevel cp, bool charging_allowed)
 }
 
 void EVSEComponent::control_(uint32_t now) {
+  if (ota_lockout_.load(std::memory_order_acquire)) {
+    force_safe_outputs_();
+    return;
+  }
+
   if (!pilot_hw_ok_ && fault_code_ == FaultCode::NONE) {
     raise_fault_(FaultCode::PILOT_OUTPUT);
     return;
@@ -1054,6 +1121,23 @@ bool EVSEComponent::apply_pilot_output_() {
 #endif
 }
 
+void EVSEComponent::force_safe_outputs_() {
+  if (contactor_pin_ != nullptr)
+    contactor_pin_->digital_write(false);
+
+  contactor_on_ = false;
+  graceful_stop_active_ = false;
+  advertised_current_ = 0.0f;
+
+#ifdef USE_ESP32
+  if (pilot_hw_ok_)
+    set_pilot_static_(false);  // external CP driver -> -12 V
+#endif
+
+  pilot_mode_ = PilotMode::NEGATIVE_DC;
+  pilot_duty_percent_ = 0.0f;
+}
+
 void EVSEComponent::open_contactor_() {
   if (contactor_pin_ != nullptr)
     contactor_pin_->digital_write(false);
@@ -1065,6 +1149,14 @@ void EVSEComponent::open_contactor_() {
 }
 
 void EVSEComponent::close_contactor_() {
+  if (ota_lockout_.load(std::memory_order_acquire)) {
+    ESP_LOGW(TAG, "Contactor close blocked by OTA safety interlock");
+    if (contactor_pin_ != nullptr)
+      contactor_pin_->digital_write(false);
+    contactor_on_ = false;
+    return;
+  }
+
   if (fault_code_ != FaultCode::NONE || !available_ || !enabled_ || !is_energizing_state_(state_))
     return;
   if (!diode_valid_)

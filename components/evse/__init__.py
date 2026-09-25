@@ -1,12 +1,12 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
-from esphome.components import sensor, binary_sensor, text_sensor
+from esphome.components import sensor, binary_sensor, text_sensor, ota
 from esphome.components.esp32 import include_builtin_idf_component
 from esphome.const import CONF_ID
 
 CODEOWNERS = []
-DEPENDENCIES = ["esp32"]
+DEPENDENCIES = ["esp32", "ota"]
 AUTO_LOAD = ["sensor", "binary_sensor", "text_sensor"]
 
 CONF_PILOT_PWM_PIN = "pilot_pwm_pin"
@@ -201,6 +201,9 @@ CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, _validate)
 
 
 async def to_code(config):
+    # Safety interlock: receive OTA_STARTED before the blocking OTA transfer.
+    ota.request_ota_state_listeners()
+
     # ESPHome excludes esp_adc from ESP-IDF builds unless a component explicitly
     # requests it. This component includes esp_adc/adc_continuous.h and uses the
     # ADC calibration driver, so it must be re-enabled for src/CMakeLists.txt.

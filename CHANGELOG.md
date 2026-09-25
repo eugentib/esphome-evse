@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.8
+
+- Add native global OTA state listener integration.
+- Force contactor OFF and CP to -12 V synchronously on `OTA_STARTED`.
+- Suspend the EVSE FreeRTOS task before the blocking OTA transfer.
+- Add atomic OTA lockout checked by the state machine and direct contactor-close path.
+- Keep the safe state through successful OTA until reboot.
+- On OTA abort/error, resume with Enable forced OFF so charging cannot restart automatically.
+- Make `ota` an explicit EVSE component dependency.
+
 ## v0.4.7
 
 - Fix native LEDC initialization log format warning by using `PRIu32` for frequency values.

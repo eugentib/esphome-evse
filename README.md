@@ -2,11 +2,37 @@
 
 Experimental IEC 61851 / SAE J1772 basic-signaling EVSE controller implemented as an ESPHome external component.
 
-**Current version: v0.4.7**  
+**Current version: v0.4.8**  
 **Framework: native ESP-IDF**  
 **Target:** classic dual-core ESP32 / ESP32 Relay X2, single phase, fixed Type 2 cable.
 
 > Experimental DIY EVSE firmware. It is not a certified safety controller.
+
+## v0.4.8
+
+### OTA safety interlock
+
+`on_shutdown()` is not sufficient for an EVSE because an OTA transfer can run
+for seconds before application shutdown/reboot.
+
+v0.4.8 subscribes directly to ESPHome's global OTA state listener. On
+`OTA_STARTED`, before the blocking transfer:
+
+```text
+OTA lockout ON
+-> Enable forced OFF
+-> EVSE task suspended
+-> contactor GPIO forced OFF immediately
+-> CP forced to -12 V
+```
+
+The state machine and `close_contactor_()` both independently check the atomic
+OTA lockout, so a concurrent task cannot re-close the relay.
+
+After successful OTA, the safe state is retained until reboot.
+
+If OTA is aborted or fails, the task resumes with `Enable = OFF` and
+`Available = ON`; charging therefore requires a new explicit Enable command.
 
 ## v0.4.7
 
@@ -220,7 +246,7 @@ After tagging v0.4.3:
 
 ```yaml
 external_components:
-  - source: github://eugentib/esphome-evse@v0.4.7
+  - source: github://eugentib/esphome-evse@v0.4.8
     components: [evse]
     refresh: never
 ```

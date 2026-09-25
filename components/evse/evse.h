@@ -1,6 +1,7 @@
 #pragma once
 
 #include <inttypes.h>
+#include <atomic>
 
 #include "esphome/core/component.h"
 #include "esphome/core/gpio.h"
@@ -8,6 +9,9 @@
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
+#ifdef USE_OTA_STATE_LISTENER
+#include "esphome/components/ota/ota_backend.h"
+#endif
 
 #ifdef USE_ESP32
 #include <freertos/FreeRTOS.h>
@@ -37,12 +41,20 @@ enum class FaultCode : uint8_t {
   PILOT_OUTPUT,
 };
 
-class EVSEComponent : public Component {
+class EVSEComponent : public Component
+#ifdef USE_OTA_STATE_LISTENER
+    , public ota::OTAGlobalStateListener
+#endif
+{
  public:
   void setup() override;
   void loop() override;
   void dump_config() override;
   void on_shutdown() override;
+#ifdef USE_OTA_STATE_LISTENER
+  void on_ota_global_state(ota::OTAState state, float progress, uint8_t error,
+                           ota::OTAComponent *component) override;
+#endif
 
   void set_pilot_pwm_pin(InternalGPIOPin *pin) { pilot_pwm_pin_ = pin; }
   void set_pilot_adc_pin(InternalGPIOPin *pin) { pilot_adc_pin_ = pin; }
@@ -145,6 +157,7 @@ class EVSEComponent : public Component {
 
   void set_pilot_mode_(PilotMode mode);
   bool apply_pilot_output_();
+  void force_safe_outputs_();
   void open_contactor_();
   void close_contactor_();
 
@@ -215,6 +228,8 @@ class EVSEComponent : public Component {
   uint8_t task_priority_{5};
   uint32_t task_stack_size_{4096};
   bool timing_debug_{false};
+  std::atomic<bool> ota_lockout_{false};
+  bool task_suspended_for_ota_{false};
 
   uint16_t state_a_min_mv_{2480}, state_a_max_mv_{2700};
   uint16_t state_b_min_mv_{2210}, state_b_max_mv_{2430};
