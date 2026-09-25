@@ -2,11 +2,32 @@
 
 Experimental IEC 61851 / SAE J1772 basic-signaling EVSE controller implemented as an ESPHome external component.
 
-**Current version: v0.4.5**  
+**Current version: v0.4.6**  
 **Framework: native ESP-IDF**  
 **Target:** classic dual-core ESP32 / ESP32 Relay X2, single phase, fixed Type 2 cable.
 
 > Experimental DIY EVSE firmware. It is not a certified safety controller.
+
+## v0.4.6
+
+Fix CP PWM duty updates while charging.
+
+In v0.4.5, changing the advertised current while PWM was already running used
+the thread-safe LEDC duty-update helper. That API can fail through LEDC's
+fade-related internal path, and the EVSE correctly treated the failure as a CP
+output fault.
+
+Because the EVSE task is the sole owner of its LEDC channel, v0.4.6 uses:
+
+```text
+ledc_set_duty()
+ledc_update_duty()
+```
+
+for in-place duty changes. Starting PWM from a static state still uses
+`ledc_channel_config()`.
+
+Any genuine LEDC error remains fail-closed.
 
 ## v0.4.5
 
@@ -157,7 +178,7 @@ After tagging v0.4.3:
 
 ```yaml
 external_components:
-  - source: github://eugentib/esphome-evse@v0.4.5
+  - source: github://eugentib/esphome-evse@v0.4.6
     components: [evse]
     refresh: never
 ```

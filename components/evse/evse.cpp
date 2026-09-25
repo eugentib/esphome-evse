@@ -7,7 +7,7 @@ static const char *const TAG = "evse";
 
 void EVSEComponent::setup() {
 #ifndef USE_ESP32
-  ESP_LOGE(TAG, "v0.4.5 requires ESP32");
+  ESP_LOGE(TAG, "v0.4.6 requires ESP32");
   mark_failed();
   return;
 #else
@@ -88,7 +88,7 @@ void EVSEComponent::setup() {
 
   ESP_LOGI(
       TAG,
-      "EVSE v0.4.5 initialized; PWM=GPIO%u ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
+      "EVSE v0.4.6 initialized; PWM=GPIO%u ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
       pilot_pwm_gpio_num_,
       pilot_adc_gpio_num_,
       task_core_,
@@ -99,7 +99,7 @@ void EVSEComponent::setup() {
 }
 
 void EVSEComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.5:");
+  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.6:");
   LOG_PIN("  Pilot PWM Pin: ", pilot_pwm_pin_);
   LOG_PIN("  Pilot ADC Pin: ", pilot_adc_pin_);
   LOG_PIN("  Contactor Pin: ", contactor_pin_);
@@ -409,7 +409,7 @@ bool EVSEComponent::start_pilot_pwm_(float duty_fraction) {
   if (duty_counts >= PILOT_LEDC_COUNTS)
     duty_counts = PILOT_LEDC_COUNTS - 1U;
 
-  esp_err_t err;
+  esp_err_t err = ESP_OK;
   if (!pilot_pwm_running_) {
     // Reconfigure the channel after ledc_stop(). This explicitly restarts the
     // peripheral and avoids relying on implicit resume semantics.
@@ -422,14 +422,30 @@ bool EVSEComponent::start_pilot_pwm_(float duty_fraction) {
     channel_cfg.duty = duty_counts;
     channel_cfg.hpoint = 0;
     err = ledc_channel_config(&channel_cfg);
+
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG,
+               "Failed to start CP PWM duty=%" PRIu32 "/%" PRIu32 ": %s",
+               duty_counts, PILOT_LEDC_COUNTS, esp_err_to_name(err));
+    }
   } else {
-    // Thread-safe API; only the EVSE task controls this channel.
-    err = ledc_set_duty_and_update(PILOT_LEDC_MODE, PILOT_LEDC_CHANNEL, duty_counts, 0);
+    // This LEDC channel is owned exclusively by the EVSE task. Use the
+    // ordinary set/update pair instead of the thread-safe helper, whose
+    // implementation can depend on LEDC fade infrastructure.
+    err = ledc_set_duty(PILOT_LEDC_MODE, PILOT_LEDC_CHANNEL, duty_counts);
+    if (err == ESP_OK)
+      err = ledc_update_duty(PILOT_LEDC_MODE, PILOT_LEDC_CHANNEL);
+
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG,
+               "Failed to update CP PWM duty=%" PRIu32 "/%" PRIu32 ": %s",
+               duty_counts, PILOT_LEDC_COUNTS, esp_err_to_name(err));
+    }
   }
 
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to apply CP PWM duty=%" PRIu32 "/%" PRIu32 ": %s",
-             duty_counts, PILOT_LEDC_COUNTS, esp_err_to_name(err));
+    // Fail closed: if the requested pilot duty cannot be guaranteed, stop CP
+    // PWM, open the contactor and let the state machine enter PILOT_OUTPUT fault.
     ledc_stop(PILOT_LEDC_MODE, PILOT_LEDC_CHANNEL, 0);
     pilot_pwm_running_ = false;
     pilot_hw_ok_ = false;

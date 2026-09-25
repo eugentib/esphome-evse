@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.6
+
+- Fix current-limit changes while CP PWM is already active.
+- Replace the thread-safe LEDC duty-update helper with `ledc_set_duty()` + `ledc_update_duty()`.
+- Keep the non-thread-safe pair safe by maintaining exclusive ownership of the channel in the EVSE task.
+- Add separate log messages for PWM start failures and PWM duty-update failures.
+- Preserve fail-closed behavior on genuine LEDC errors.
+
 ## v0.4.5
 
 - Add configurable `invalid_grace_time` (default 100 ms).
