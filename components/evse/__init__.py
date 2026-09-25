@@ -11,6 +11,7 @@ AUTO_LOAD = ["sensor", "binary_sensor", "text_sensor"]
 
 CONF_PILOT_PWM_PIN = "pilot_pwm_pin"
 CONF_PILOT_ADC_PIN = "pilot_adc_pin"
+CONF_CT_ADC_PIN = "ct_adc_pin"
 CONF_CONTACTOR_PIN = "contactor_pin"
 CONF_MAX_CURRENT = "max_current"
 CONF_DEFAULT_CURRENT = "default_current"
@@ -32,6 +33,11 @@ CONF_TASK_CORE = "task_core"
 CONF_TASK_PRIORITY = "task_priority"
 CONF_TASK_STACK_SIZE = "task_stack_size"
 CONF_TIMING_DEBUG = "timing_debug"
+CONF_CT_RATIO = "ct_ratio"
+CONF_CT_BURDEN_OHMS = "ct_burden_ohms"
+CONF_CT_NOMINAL_VOLTAGE = "ct_nominal_voltage"
+CONF_CT_RMS_WINDOW = "ct_rms_window"
+CONF_CT_NOISE_FLOOR = "ct_noise_floor"
 
 CONF_STATE_A_MIN_MV = "state_a_min_mv"
 CONF_STATE_A_MAX_MV = "state_a_max_mv"
@@ -50,6 +56,8 @@ CONF_FAULT_REASON = "fault_reason"
 CONF_CP_HIGH_MV = "cp_high_mv"
 CONF_CP_LOW_MV = "cp_low_mv"
 CONF_ADVERTISED_CURRENT = "advertised_current"
+CONF_CHARGING_CURRENT = "charging_current"
+CONF_CHARGING_POWER = "charging_power"
 CONF_TASK_LATE_CYCLES = "task_late_cycles"
 CONF_TASK_MAX_RUNTIME = "task_max_runtime"
 CONF_TASK_LAST_RUNTIME = "task_last_runtime"
@@ -75,11 +83,18 @@ CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(EVSEComponent),
     cv.Required(CONF_PILOT_PWM_PIN): pins.internal_gpio_output_pin_schema,
     cv.Required(CONF_PILOT_ADC_PIN): pins.internal_gpio_input_pin_schema,
+    cv.Optional(CONF_CT_ADC_PIN): pins.internal_gpio_input_pin_schema,
     cv.Required(CONF_CONTACTOR_PIN): pins.internal_gpio_output_pin_schema,
 
     cv.Optional(CONF_MAX_CURRENT, default=16.0): cv.float_range(min=6.0, max=32.0),
     cv.Optional(CONF_DEFAULT_CURRENT, default=6.0): cv.float_range(min=6.0, max=32.0),
     cv.Optional(CONF_ALLOW_VENTILATION, default=False): cv.boolean,
+
+    cv.Optional(CONF_CT_RATIO, default=2000.0): cv.float_range(min=1.0, max=100000.0),
+    cv.Optional(CONF_CT_BURDEN_OHMS, default=75.0): cv.float_range(min=0.1, max=10000.0),
+    cv.Optional(CONF_CT_NOMINAL_VOLTAGE, default=230.0): cv.float_range(min=1.0, max=1000.0),
+    cv.Optional(CONF_CT_RMS_WINDOW, default="200ms"): cv.positive_time_period_milliseconds,
+    cv.Optional(CONF_CT_NOISE_FLOOR, default=0.15): cv.float_range(min=0.0, max=10.0),
 
     cv.Optional(CONF_SAMPLE_INTERVAL, default="20ms"): cv.positive_time_period_milliseconds,
     # Legacy v0.4.1 option. Accepted but no longer used by the DMA sampler.
@@ -121,6 +136,12 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_CP_LOW_MV): sensor.sensor_schema(unit_of_measurement="mV", accuracy_decimals=0, icon="mdi:sine-wave"),
     cv.Optional(CONF_ADVERTISED_CURRENT): sensor.sensor_schema(
         unit_of_measurement="A", accuracy_decimals=1, icon="mdi:current-ac"
+    ),
+    cv.Optional(CONF_CHARGING_CURRENT): sensor.sensor_schema(
+        unit_of_measurement="A", accuracy_decimals=2, icon="mdi:current-ac"
+    ),
+    cv.Optional(CONF_CHARGING_POWER): sensor.sensor_schema(
+        unit_of_measurement="W", accuracy_decimals=0, icon="mdi:flash"
     ),
     cv.Optional(CONF_TASK_LATE_CYCLES): sensor.sensor_schema(
         accuracy_decimals=0, icon="mdi:timer-alert-outline"
@@ -186,11 +207,20 @@ def _validate(config):
     if config[CONF_DIODE_MIN_MV] > config[CONF_DIODE_MAX_MV]:
         raise cv.Invalid("diode_min_mv must be <= diode_max_mv")
 
-    expected_samples = (config[CONF_ADC_SAMPLE_RATE] * config[CONF_SAMPLE_INTERVAL].total_milliseconds) // 1000
+    adc_pattern_count = 2 if CONF_CT_ADC_PIN in config else 1
+    expected_samples = (
+        config[CONF_ADC_SAMPLE_RATE] * config[CONF_SAMPLE_INTERVAL].total_milliseconds
+    ) // (1000 * adc_pattern_count)
     if config[CONF_ADC_MIN_SAMPLES] >= expected_samples:
         raise cv.Invalid(
-            "adc_min_samples must be lower than the nominal samples collected per task interval"
+            "adc_min_samples must be lower than the nominal CP samples collected per task interval"
         )
+
+    if config[CONF_CT_RMS_WINDOW].total_milliseconds < 100:
+        raise cv.Invalid("ct_rms_window must be at least 100ms")
+
+    if (CONF_CHARGING_CURRENT in config or CONF_CHARGING_POWER in config) and CONF_CT_ADC_PIN not in config:
+        raise cv.Invalid("charging_current/charging_power require ct_adc_pin")
     if config[CONF_ADC_PEAK_SAMPLES] * 2 >= config[CONF_ADC_MIN_SAMPLES]:
         raise cv.Invalid("adc_peak_samples is too large relative to adc_min_samples")
 
@@ -222,10 +252,18 @@ async def to_code(config):
 
     cg.add(var.set_pilot_pwm_pin(pilot_pwm_pin))
     cg.add(var.set_pilot_adc_pin(pilot_adc_pin))
+    if CONF_CT_ADC_PIN in config:
+        ct_adc_pin = await cg.gpio_pin_expression(config[CONF_CT_ADC_PIN])
+        cg.add(var.set_ct_adc_pin(ct_adc_pin))
     cg.add(var.set_contactor_pin(contactor_pin))
     cg.add(var.set_max_current(config[CONF_MAX_CURRENT]))
     cg.add(var.set_default_current(config[CONF_DEFAULT_CURRENT]))
     cg.add(var.set_allow_ventilation(config[CONF_ALLOW_VENTILATION]))
+    cg.add(var.set_ct_ratio(config[CONF_CT_RATIO]))
+    cg.add(var.set_ct_burden_ohms(config[CONF_CT_BURDEN_OHMS]))
+    cg.add(var.set_ct_nominal_voltage(config[CONF_CT_NOMINAL_VOLTAGE]))
+    cg.add(var.set_ct_rms_window(config[CONF_CT_RMS_WINDOW].total_milliseconds))
+    cg.add(var.set_ct_noise_floor(config[CONF_CT_NOISE_FLOOR]))
 
     cg.add(var.set_sample_interval(config[CONF_SAMPLE_INTERVAL].total_milliseconds))
     cg.add(var.set_sample_window_us(config[CONF_SAMPLE_WINDOW_US]))  # legacy, ignored by DMA sampler
@@ -294,6 +332,12 @@ async def to_code(config):
     if CONF_ADVERTISED_CURRENT in config:
         ent = await sensor.new_sensor(config[CONF_ADVERTISED_CURRENT])
         cg.add(var.set_advertised_current_sensor(ent))
+    if CONF_CHARGING_CURRENT in config:
+        ent = await sensor.new_sensor(config[CONF_CHARGING_CURRENT])
+        cg.add(var.set_charging_current_sensor(ent))
+    if CONF_CHARGING_POWER in config:
+        ent = await sensor.new_sensor(config[CONF_CHARGING_POWER])
+        cg.add(var.set_charging_power_sensor(ent))
     if timing_debug:
         if CONF_TASK_LATE_CYCLES in config:
             ent = await sensor.new_sensor(config[CONF_TASK_LATE_CYCLES])

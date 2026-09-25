@@ -1,5 +1,7 @@
 #include "evse.h"
 
+#include <cmath>
+
 namespace esphome {
 namespace evse {
 
@@ -7,7 +9,7 @@ static const char *const TAG = "evse";
 
 void EVSEComponent::setup() {
 #ifndef USE_ESP32
-  ESP_LOGE(TAG, "v0.4.9 requires ESP32");
+  ESP_LOGE(TAG, "v0.5.0 requires ESP32");
   mark_failed();
   return;
 #else
@@ -29,6 +31,11 @@ void EVSEComponent::setup() {
 
   pilot_adc_pin_->setup();
   pilot_adc_gpio_num_ = pilot_adc_pin_->get_pin();
+
+  if (ct_adc_pin_ != nullptr) {
+    ct_adc_pin_->setup();
+    ct_adc_gpio_num_ = ct_adc_pin_->get_pin();
+  }
 
   if (!setup_adc_dma_()) {
     ESP_LOGE(TAG, "Failed to initialize continuous ADC/DMA on GPIO%u", pilot_adc_gpio_num_);
@@ -64,6 +71,7 @@ void EVSEComponent::setup() {
   candidate_since_ms_ = now;
   invalid_since_ms_ = 0;
   state_entered_ms_ = now;
+  ct_window_started_ms_ = now;
   update_snapshot_(now);
 
 #ifdef USE_OTA_STATE_LISTENER
@@ -92,9 +100,10 @@ void EVSEComponent::setup() {
 
   ESP_LOGI(
       TAG,
-      "EVSE v0.4.9 initialized; PWM=GPIO%u ADC=GPIO%u, task core=%u priority=%u stack=%" PRIu32 " B",
+      "EVSE v0.5.0 initialized; PWM=GPIO%u CP_ADC=GPIO%u CT_ADC=%s, task core=%u priority=%u stack=%" PRIu32 " B",
       pilot_pwm_gpio_num_,
       pilot_adc_gpio_num_,
+      ct_adc_pin_ != nullptr ? "enabled" : "disabled",
       task_core_,
       task_priority_,
       task_stack_size_
@@ -103,12 +112,20 @@ void EVSEComponent::setup() {
 }
 
 void EVSEComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.4.9:");
+  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.5.0:");
   LOG_PIN("  Pilot PWM Pin: ", pilot_pwm_pin_);
   LOG_PIN("  Pilot ADC Pin: ", pilot_adc_pin_);
+  if (ct_adc_pin_ != nullptr)
+    LOG_PIN("  CT ADC Pin: ", ct_adc_pin_);
   LOG_PIN("  Contactor Pin: ", contactor_pin_);
   ESP_LOGCONFIG(TAG, "  Max/default current: %.1f / %.1f A", max_current_, default_current_);
   ESP_LOGCONFIG(TAG, "  Allow State D charging: %s", YESNO(allow_ventilation_));
+  if (ct_adc_pin_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  CT: ratio=%.1f:1 burden=%.2f ohm nominal_voltage=%.1f V",
+                  ct_ratio_, ct_burden_ohms_, ct_nominal_voltage_);
+    ESP_LOGCONFIG(TAG, "  CT RMS window: %" PRIu32 " ms, noise floor: %.2f A",
+                  ct_rms_window_ms_, ct_noise_floor_a_);
+  }
   ESP_LOGCONFIG(TAG, "  EVSE task: core=%u priority=%u stack=%" PRIu32 " B", task_core_, task_priority_, task_stack_size_);
   ESP_LOGCONFIG(TAG, "  Timing debug: %s", YESNO(timing_debug_));
   ESP_LOGCONFIG(TAG, "  Task/sample interval: %" PRIu32 " ms", sample_interval_ms_);
@@ -540,6 +557,22 @@ bool EVSEComponent::setup_adc_dma_() {
   }
   adc_channel_ = channel;
 
+  bool ct_enabled = ct_adc_pin_ != nullptr;
+  if (ct_enabled) {
+    adc_unit_t ct_unit = ADC_UNIT_1;
+    adc_channel_t ct_channel = ADC_CHANNEL_0;
+    err = adc_continuous_io_to_channel(ct_adc_gpio_num_, &ct_unit, &ct_channel);
+    if (err != ESP_OK || ct_unit != ADC_UNIT_1) {
+      ESP_LOGE(TAG, "CT GPIO%u is not an ADC1 channel (%s)", ct_adc_gpio_num_, esp_err_to_name(err));
+      return false;
+    }
+    if (ct_channel == adc_channel_) {
+      ESP_LOGE(TAG, "CT ADC pin must be different from the CP ADC pin");
+      return false;
+    }
+    ct_adc_channel_ = ct_channel;
+  }
+
   adc_continuous_handle_cfg_t handle_cfg = {};
   handle_cfg.max_store_buf_size = 8192;
   handle_cfg.conv_frame_size = 256;
@@ -551,18 +584,29 @@ bool EVSEComponent::setup_adc_dma_() {
     return false;
   }
 
-  adc_digi_pattern_config_t pattern = {};
-  pattern.atten = ADC_ATTEN_DB_12;
-  pattern.channel = static_cast<uint8_t>(adc_channel_) & 0x7;
-  pattern.unit = ADC_UNIT_1;
-  pattern.bit_width = SOC_ADC_DIGI_MAX_BITWIDTH;
+  adc_digi_pattern_config_t patterns[2] = {};
+  patterns[0].atten = ADC_ATTEN_DB_12;
+  patterns[0].channel = static_cast<uint8_t>(adc_channel_) & 0x7;
+  patterns[0].unit = ADC_UNIT_1;
+  patterns[0].bit_width = SOC_ADC_DIGI_MAX_BITWIDTH;
+
+  uint32_t pattern_count = 1;
+  if (ct_enabled) {
+    patterns[1].atten = ADC_ATTEN_DB_12;
+    patterns[1].channel = static_cast<uint8_t>(ct_adc_channel_) & 0x7;
+    patterns[1].unit = ADC_UNIT_1;
+    patterns[1].bit_width = SOC_ADC_DIGI_MAX_BITWIDTH;
+    pattern_count = 2;
+  }
 
   adc_continuous_config_t cfg = {};
+  // sample_freq_hz is the aggregate conversion rate. With CT enabled the two
+  // patterns alternate, so CP and CT each receive approximately half of this.
   cfg.sample_freq_hz = adc_sample_rate_hz_;
   cfg.conv_mode = ADC_CONV_SINGLE_UNIT_1;
   cfg.format = ADC_DIGI_OUTPUT_FORMAT_TYPE1;
-  cfg.pattern_num = 1;
-  cfg.adc_pattern = &pattern;
+  cfg.pattern_num = pattern_count;
+  cfg.adc_pattern = patterns;
 
   err = adc_continuous_config(adc_dma_handle_, &cfg);
   if (err != ESP_OK) {
@@ -590,8 +634,17 @@ bool EVSEComponent::setup_adc_dma_() {
     return false;
   }
 
-  ESP_LOGI(TAG, "ADC DMA: GPIO%u ADC1_CH%u at %" PRIu32 " samples/s", pilot_adc_gpio_num_,
-           static_cast<unsigned>(adc_channel_), adc_sample_rate_hz_);
+  if (ct_enabled) {
+    ESP_LOGI(TAG,
+             "ADC DMA: CP GPIO%u ADC1_CH%u + CT GPIO%u ADC1_CH%u at %" PRIu32
+             " aggregate samples/s (~%" PRIu32 "/s/channel)",
+             pilot_adc_gpio_num_, static_cast<unsigned>(adc_channel_),
+             ct_adc_gpio_num_, static_cast<unsigned>(ct_adc_channel_),
+             adc_sample_rate_hz_, adc_sample_rate_hz_ / 2U);
+  } else {
+    ESP_LOGI(TAG, "ADC DMA: GPIO%u ADC1_CH%u at %" PRIu32 " samples/s",
+             pilot_adc_gpio_num_, static_cast<unsigned>(adc_channel_), adc_sample_rate_hz_);
+  }
   return true;
 }
 
@@ -718,6 +771,14 @@ void EVSEComponent::sample_cp_() {
       const auto *p = reinterpret_cast<const adc_digi_output_data_t *>(&adc_read_buffer_[i]);
       const uint8_t channel = p->type1.channel;
       const uint16_t raw = p->type1.data;
+
+      if (ct_adc_pin_ != nullptr && channel == static_cast<uint8_t>(ct_adc_channel_)) {
+        ct_sum_raw_ += raw;
+        ct_sum_sq_raw_ += static_cast<uint64_t>(raw) * static_cast<uint64_t>(raw);
+        ct_sample_count_++;
+        continue;
+      }
+
       if (channel != static_cast<uint8_t>(adc_channel_))
         continue;
 
@@ -753,6 +814,8 @@ void EVSEComponent::sample_cp_() {
   }
 
   adc_last_sample_count_ = sample_count;
+  update_ct_measurement_(now_ms_());
+
   if (read_error || sample_count < adc_min_samples_ || top_count == 0 || bottom_count == 0) {
     adc_sample_valid_ = false;
     sampled_cp_ = CpLevel::UNKNOWN;
@@ -786,6 +849,86 @@ void EVSEComponent::sample_cp_() {
   sampled_cp_ = classify_cp_(cp_high_mv_);
   diode_sample_valid_ =
       pilot_mode_ != PilotMode::PWM || mv_in_window_(cp_low_mv_, diode_min_mv_, diode_max_mv_);
+#endif
+}
+
+
+void EVSEComponent::update_ct_measurement_(uint32_t now) {
+#ifdef USE_ESP32
+  if (ct_adc_pin_ == nullptr)
+    return;
+
+  if (ct_window_started_ms_ == 0)
+    ct_window_started_ms_ = now;
+
+  if ((uint32_t) (now - ct_window_started_ms_) < ct_rms_window_ms_)
+    return;
+
+  if (ct_sample_count_ < 32) {
+    ct_current_a_ = 0.0f;
+    ct_power_w_ = 0.0f;
+    ct_sum_raw_ = 0;
+    ct_sum_sq_raw_ = 0;
+    ct_sample_count_ = 0;
+    ct_window_started_ms_ = now;
+    return;
+  }
+
+  const double n = static_cast<double>(ct_sample_count_);
+  const double mean_raw = static_cast<double>(ct_sum_raw_) / n;
+  const double mean_sq_raw = static_cast<double>(ct_sum_sq_raw_) / n;
+  double variance_raw = mean_sq_raw - mean_raw * mean_raw;
+  if (variance_raw < 0.0)
+    variance_raw = 0.0;
+
+  const double rms_raw = std::sqrt(variance_raw);
+
+  // The ESP-IDF line-fitting calibration is linear. Estimate its local slope
+  // around the CT bias point using two calibrated values, then apply that
+  // slope to the AC RMS component. This avoids an expensive calibration call
+  // for every CT sample.
+  int center_raw = static_cast<int>(mean_raw + 0.5);
+  if (center_raw < 0) center_raw = 0;
+  if (center_raw > 4095) center_raw = 4095;
+
+  int lo_raw = center_raw - 512;
+  int hi_raw = center_raw + 512;
+  if (lo_raw < 0) lo_raw = 0;
+  if (hi_raw > 4095) hi_raw = 4095;
+
+  int lo_mv = 0;
+  int hi_mv = 0;
+  bool calibrated =
+      hi_raw > lo_raw &&
+      adc_cali_raw_to_voltage(adc_cali_handle_, lo_raw, &lo_mv) == ESP_OK &&
+      adc_cali_raw_to_voltage(adc_cali_handle_, hi_raw, &hi_mv) == ESP_OK;
+
+  if (!calibrated || hi_mv <= lo_mv || ct_burden_ohms_ <= 0.0f) {
+    adc_read_errors_++;
+    ct_current_a_ = 0.0f;
+    ct_power_w_ = 0.0f;
+  } else {
+    const double mv_per_raw =
+        static_cast<double>(hi_mv - lo_mv) / static_cast<double>(hi_raw - lo_raw);
+    const double rms_mv = rms_raw * mv_per_raw;
+    float current_a = static_cast<float>(
+        (rms_mv / 1000.0) * static_cast<double>(ct_ratio_) /
+        static_cast<double>(ct_burden_ohms_));
+
+    if (current_a < ct_noise_floor_a_)
+      current_a = 0.0f;
+
+    ct_current_a_ = current_a;
+    // Estimated active power: assumes nominal mains voltage and PF ~= 1.
+    ct_power_w_ = current_a * ct_nominal_voltage_;
+  }
+
+  ct_sum_raw_ = 0;
+  ct_sum_sq_raw_ = 0;
+  ct_sample_count_ = 0;
+  ct_window_started_ms_ = now;
+#else
+  (void) now;
 #endif
 }
 
@@ -1142,6 +1285,8 @@ void EVSEComponent::force_safe_outputs_() {
   portENTER_CRITICAL(&data_mux_);
 #endif
   snapshot_advertised_current_ = 0.0f;
+  snapshot_charging_current_ = 0.0f;
+  snapshot_charging_power_ = 0.0f;
   snapshot_contactor_on_ = false;
   snapshot_graceful_stop_ = false;
   snapshot_pilot_duty_percent_ = 0.0f;
@@ -1258,6 +1403,8 @@ void EVSEComponent::update_snapshot_(uint32_t heartbeat_ms) {
   snapshot_cp_high_mv_ = cp_high_mv_;
   snapshot_cp_low_mv_ = cp_low_mv_;
   snapshot_advertised_current_ = pilot_mode_ == PilotMode::PWM ? current_limit_ : 0.0f;
+  snapshot_charging_current_ = ct_current_a_;
+  snapshot_charging_power_ = ct_power_w_;
   snapshot_contactor_on_ = contactor_on_;
   snapshot_graceful_stop_ = graceful_stop_active_;
   snapshot_task_heartbeat_ms_ = heartbeat_ms;
@@ -1283,6 +1430,8 @@ void EVSEComponent::publish_() {
   uint16_t high_mv;
   uint16_t low_mv;
   float advertised_current;
+  float charging_current;
+  float charging_power;
   bool contactor_on;
   bool graceful_stop;
   uint32_t heartbeat_ms;
@@ -1306,6 +1455,8 @@ void EVSEComponent::publish_() {
   high_mv = snapshot_cp_high_mv_;
   low_mv = snapshot_cp_low_mv_;
   advertised_current = snapshot_advertised_current_;
+  charging_current = snapshot_charging_current_;
+  charging_power = snapshot_charging_power_;
   contactor_on = snapshot_contactor_on_;
   graceful_stop = snapshot_graceful_stop_;
   heartbeat_ms = snapshot_task_heartbeat_ms_;
@@ -1335,6 +1486,10 @@ void EVSEComponent::publish_() {
     cp_low_mv_sensor_->publish_state(low_mv);
   if (advertised_current_sensor_ != nullptr)
     advertised_current_sensor_->publish_state(advertised_current);
+  if (charging_current_sensor_ != nullptr)
+    charging_current_sensor_->publish_state(charging_current);
+  if (charging_power_sensor_ != nullptr)
+    charging_power_sensor_->publish_state(charging_power);
   if (task_late_cycles_sensor_ != nullptr)
     task_late_cycles_sensor_->publish_state(late_cycles);
   if (task_max_runtime_sensor_ != nullptr)

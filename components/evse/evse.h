@@ -58,6 +58,7 @@ class EVSEComponent : public Component
 
   void set_pilot_pwm_pin(InternalGPIOPin *pin) { pilot_pwm_pin_ = pin; }
   void set_pilot_adc_pin(InternalGPIOPin *pin) { pilot_adc_pin_ = pin; }
+  void set_ct_adc_pin(InternalGPIOPin *pin) { ct_adc_pin_ = pin; }
   void set_contactor_pin(InternalGPIOPin *pin) { contactor_pin_ = pin; }
 
   void set_max_current(float amps) { max_current_ = amps; }
@@ -67,6 +68,11 @@ class EVSEComponent : public Component
     current_limit_ = amps;
   }
   void set_allow_ventilation(bool value) { allow_ventilation_ = value; }
+  void set_ct_ratio(float value) { ct_ratio_ = value; }
+  void set_ct_burden_ohms(float value) { ct_burden_ohms_ = value; }
+  void set_ct_nominal_voltage(float value) { ct_nominal_voltage_ = value; }
+  void set_ct_rms_window(uint32_t ms) { ct_rms_window_ms_ = ms; }
+  void set_ct_noise_floor(float amps) { ct_noise_floor_a_ = amps; }
 
   void set_sample_interval(uint32_t ms) { sample_interval_ms_ = ms; }
   void set_sample_window_us(uint32_t us) { sample_window_us_ = us; }  // legacy v0.4.1
@@ -104,6 +110,8 @@ class EVSEComponent : public Component
   void set_cp_high_mv_sensor(sensor::Sensor *s) { cp_high_mv_sensor_ = s; }
   void set_cp_low_mv_sensor(sensor::Sensor *s) { cp_low_mv_sensor_ = s; }
   void set_advertised_current_sensor(sensor::Sensor *s) { advertised_current_sensor_ = s; }
+  void set_charging_current_sensor(sensor::Sensor *s) { charging_current_sensor_ = s; }
+  void set_charging_power_sensor(sensor::Sensor *s) { charging_power_sensor_ = s; }
   void set_task_late_cycles_sensor(sensor::Sensor *s) { task_late_cycles_sensor_ = s; }
   void set_task_max_runtime_sensor(sensor::Sensor *s) { task_max_runtime_sensor_ = s; }
   void set_task_last_runtime_sensor(sensor::Sensor *s) { task_last_runtime_sensor_ = s; }
@@ -146,6 +154,7 @@ class EVSEComponent : public Component
   void flush_adc_dma_();
 #endif
   void sample_cp_();
+  void update_ct_measurement_(uint32_t now);
   void update_adc_supervision_(uint32_t now);
   CpLevel classify_cp_(uint16_t high_mv) const;
   void update_stable_cp_(CpLevel sampled, uint32_t now);
@@ -179,9 +188,11 @@ class EVSEComponent : public Component
 
   InternalGPIOPin *pilot_pwm_pin_{nullptr};
   InternalGPIOPin *pilot_adc_pin_{nullptr};
+  InternalGPIOPin *ct_adc_pin_{nullptr};
   InternalGPIOPin *contactor_pin_{nullptr};
   uint8_t pilot_pwm_gpio_num_{0};
   uint8_t pilot_adc_gpio_num_{0};
+  uint8_t ct_adc_gpio_num_{0};
 
   text_sensor::TextSensor *state_sensor_{nullptr};
   text_sensor::TextSensor *physical_state_sensor_{nullptr};
@@ -189,6 +200,8 @@ class EVSEComponent : public Component
   sensor::Sensor *cp_high_mv_sensor_{nullptr};
   sensor::Sensor *cp_low_mv_sensor_{nullptr};
   sensor::Sensor *advertised_current_sensor_{nullptr};
+  sensor::Sensor *charging_current_sensor_{nullptr};
+  sensor::Sensor *charging_power_sensor_{nullptr};
   sensor::Sensor *task_late_cycles_sensor_{nullptr};
   sensor::Sensor *task_max_runtime_sensor_{nullptr};
   sensor::Sensor *task_last_runtime_sensor_{nullptr};
@@ -209,6 +222,12 @@ class EVSEComponent : public Component
   float max_current_{16.0f};
   float default_current_{6.0f};
   bool allow_ventilation_{false};
+
+  float ct_ratio_{2000.0f};
+  float ct_burden_ohms_{75.0f};
+  float ct_nominal_voltage_{230.0f};
+  uint32_t ct_rms_window_ms_{200};
+  float ct_noise_floor_a_{0.15f};
 
   uint32_t sample_interval_ms_{20};
   uint32_t sample_window_us_{3000};  // legacy v0.4.1; DMA sampler ignores it
@@ -243,6 +262,7 @@ class EVSEComponent : public Component
   adc_continuous_handle_t adc_dma_handle_{nullptr};
   adc_cali_handle_t adc_cali_handle_{nullptr};
   adc_channel_t adc_channel_{ADC_CHANNEL_0};
+  adc_channel_t ct_adc_channel_{ADC_CHANNEL_0};
   alignas(4) uint8_t adc_read_buffer_[1024]{};
 
   static constexpr ledc_mode_t PILOT_LEDC_MODE = LEDC_HIGH_SPEED_MODE;
@@ -275,6 +295,13 @@ class EVSEComponent : public Component
   uint16_t cp_high_mv_{0};
   uint16_t cp_low_mv_{3300};
 
+  uint64_t ct_sum_raw_{0};
+  uint64_t ct_sum_sq_raw_{0};
+  uint32_t ct_sample_count_{0};
+  uint32_t ct_window_started_ms_{0};
+  float ct_current_a_{0.0f};
+  float ct_power_w_{0.0f};
+
   CpLevel sampled_cp_{CpLevel::UNKNOWN};
   CpLevel candidate_cp_{CpLevel::UNKNOWN};
   CpLevel stable_cp_{CpLevel::UNKNOWN};
@@ -306,6 +333,8 @@ class EVSEComponent : public Component
   uint16_t snapshot_cp_high_mv_{0};
   uint16_t snapshot_cp_low_mv_{3300};
   float snapshot_advertised_current_{0.0f};
+  float snapshot_charging_current_{0.0f};
+  float snapshot_charging_power_{0.0f};
   bool snapshot_contactor_on_{false};
   bool snapshot_graceful_stop_{false};
   uint32_t snapshot_task_heartbeat_ms_{0};

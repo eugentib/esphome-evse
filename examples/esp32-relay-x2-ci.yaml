@@ -100,7 +100,16 @@ evse:
   pilot_pwm_pin: GPIO25
   pilot_adc_pin: GPIO34
 
-  # v0.4.9 controls the onboard relay directly from the dedicated EVSE task.
+  # Optional CT telemetry input. GPIO32 is ADC1_CH4.
+  # Hardware used here: CT 2000:1, 75 ohm burden, ADC biased around 1.65 V.
+  ct_adc_pin: GPIO32
+  ct_ratio: 2000
+  ct_burden_ohms: 75
+  ct_nominal_voltage: 230
+  ct_rms_window: 200ms
+  ct_noise_floor: 0.15
+
+  # v0.5.0 controls the onboard relay directly from the dedicated EVSE task.
   # On ESP32 Relay X2, relay 1 is GPIO16. It must drive only an EXTERNAL
   # contactor coil, never the EV charging current itself.
   contactor_pin: GPIO16
@@ -112,8 +121,10 @@ evse:
   # The dedicated FreeRTOS task samples and executes the state machine every
   # 20 ms. GPIO34 is ADC1, so BLE/Wi-Fi do not create the ADC2 conflict.
   sample_interval: 20ms
-  # Continuous ADC/DMA: 80 samples per 1 kHz CP period. At 6 A / 10% duty
-  # there are about 8 samples in every positive 100 us pulse.
+  # Continuous ADC/DMA. adc_sample_rate is the aggregate rate.
+  # With CP + CT enabled, the two ADC1 channels alternate at ~40 kS/s each.
+  # At the IEC minimum 10% CP duty this still gives ~4 samples in every
+  # positive 100 us pulse and ~800 CP samples per 20 ms task cycle.
   adc_sample_rate: 80000
   adc_peak_samples: 16
   adc_min_samples: 200
@@ -176,6 +187,10 @@ evse:
     name: "EVSE CP Low"
   advertised_current:
     name: "EVSE Advertised Current"
+  charging_current:
+    name: "EVSE Measured Charging Current"
+  charging_power:
+    name: "EVSE Estimated Charging Power"
   # These entities are created only while timing_debug: true.
   task_late_cycles:
     name: "EVSE Task Late Cycles"

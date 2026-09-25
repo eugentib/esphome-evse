@@ -2,11 +2,78 @@
 
 Experimental IEC 61851 / SAE J1772 basic-signaling EVSE controller implemented as an ESPHome external component.
 
-**Current version: v0.4.9**  
+**Current version: v0.5.0**  
 **Framework: native ESP-IDF**  
 **Target:** classic dual-core ESP32 / ESP32 Relay X2, single phase, fixed Type 2 cable.
 
 > Experimental DIY EVSE firmware. It is not a certified safety controller.
+
+## v0.5.0
+
+### CT current / charging-power telemetry
+
+v0.5.0 can sample an optional current transformer on a second ADC1 channel
+using the **same ESP-IDF continuous ADC/DMA engine** already used for CP.
+
+Default/example hardware:
+
+```text
+CT ratio:       2000:1
+Burden:         75 ohm
+ADC input:      GPIO32 / ADC1_CH4
+ADC bias:       approximately 1.65 V
+Nominal mains:  230 V
+RMS window:     200 ms
+```
+
+Example configuration:
+
+```yaml
+evse:
+  pilot_adc_pin: GPIO34
+
+  ct_adc_pin: GPIO32
+  ct_ratio: 2000
+  ct_burden_ohms: 75
+  ct_nominal_voltage: 230
+  ct_rms_window: 200ms
+  ct_noise_floor: 0.15
+
+  charging_current:
+    name: "EVSE Measured Charging Current"
+  charging_power:
+    name: "EVSE Estimated Charging Power"
+```
+
+The 80 kS/s ADC stream alternates between CP and CT, giving approximately
+40 kS/s per channel. CP classification remains on the existing high/low
+plateau algorithm. CT processing only performs O(1) sum/sum-of-squares
+accumulation while samples are drained, then computes RMS every 200 ms.
+
+The CT DC bias is removed mathematically:
+
+```text
+RMSraw = sqrt(mean(raw^2) - mean(raw)^2)
+```
+
+The RMS ADC amplitude is converted to primary current using:
+
+```text
+Iprimary = Vrms_ADC / burden * CT_ratio
+```
+
+and charging power is estimated as:
+
+```text
+P ~= I_RMS * ct_nominal_voltage
+```
+
+The power value assumes power factor approximately 1 and does not measure the
+actual mains voltage, so it is telemetry rather than a revenue-grade energy
+measurement.
+
+CT measurement is deliberately **not** part of the EVSE safety state machine;
+a CT fault or disconnected CT cannot energize or de-energize the contactor.
 
 ## v0.4.9
 

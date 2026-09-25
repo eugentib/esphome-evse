@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.5.0
+
+- Add optional CT ADC input on a second ADC1 channel.
+- Add CT ratio, burden, nominal-voltage, RMS-window and noise-floor configuration.
+- Interleave CP and CT in the existing ESP-IDF continuous ADC/DMA stream.
+- Compute CT RMS from raw sum/sum-of-squares with DC-bias removal.
+- Use the ESP-IDF ADC calibration slope to convert AC RMS counts to millivolts.
+- Add `charging_current` and estimated `charging_power` Home Assistant sensors.
+- Keep CT telemetry completely separate from EVSE safety/control decisions.
+- Update the example for GPIO32, 2000:1 CT, 75 ohm burden and 230 V estimate.
+- Fix the duplicate `force_safe_outputs_()` call left in the OTA-start path.
+
+
 ## v0.4.9
 
 - Fix v0.4.8 compile failure caused by an invalid `advertised_current_` member reference.
