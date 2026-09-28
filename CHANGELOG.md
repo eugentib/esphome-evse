@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.5.1
+
+- Add `EVSE Session Energy` sensor in kWh.
+- Add restored/persistent `EVSE Total Energy` sensor in kWh.
+- Mark both energy sensors as `device_class: energy` and `state_class: total_increasing`.
+- Integrate CT-estimated charging power over the actual RMS-window elapsed time.
+- Count energy only while the EVSE contactor is energized.
+- Reset session energy on a new contactor energization.
+- Queue total-energy preference saves from the main loop and explicitly sync on OTA/shutdown after safe-off.
+- Add current/power Home Assistant device/state classes.
+
 ## v0.5.0
 
 - Add optional CT ADC input on a second ADC1 channel.

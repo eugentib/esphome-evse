@@ -9,7 +9,7 @@ static const char *const TAG = "evse";
 
 void EVSEComponent::setup() {
 #ifndef USE_ESP32
-  ESP_LOGE(TAG, "v0.5.0 requires ESP32");
+  ESP_LOGE(TAG, "v0.5.1 requires ESP32");
   mark_failed();
   return;
 #else
@@ -67,6 +67,24 @@ void EVSEComponent::setup() {
     return;
   }
 
+  // Restore lifetime charging energy using the Total Energy entity's
+  // preference key. Session energy intentionally starts at zero after boot.
+  if (total_energy_sensor_ != nullptr) {
+    total_energy_pref_ = total_energy_sensor_->make_entity_preference<float>(1);
+    float restored_kwh = 0.0f;
+    if (total_energy_pref_.load(&restored_kwh) &&
+        std::isfinite(restored_kwh) && restored_kwh >= 0.0f) {
+      total_energy_kwh_ = restored_kwh;
+      last_pref_queued_total_energy_kwh_ = restored_kwh;
+      ESP_LOGI(TAG, "Restored EVSE total energy: %.3f kWh", total_energy_kwh_);
+    } else {
+      total_energy_kwh_ = 0.0f;
+      last_pref_queued_total_energy_kwh_ = 0.0f;
+    }
+    total_energy_pref_ready_ = true;
+  }
+  session_energy_kwh_ = 0.0f;
+
   const uint32_t now = now_ms_();
   candidate_since_ms_ = now;
   invalid_since_ms_ = 0;
@@ -100,7 +118,7 @@ void EVSEComponent::setup() {
 
   ESP_LOGI(
       TAG,
-      "EVSE v0.5.0 initialized; PWM=GPIO%u CP_ADC=GPIO%u CT_ADC=%s, task core=%u priority=%u stack=%" PRIu32 " B",
+      "EVSE v0.5.1 initialized; PWM=GPIO%u CP_ADC=GPIO%u CT_ADC=%s, task core=%u priority=%u stack=%" PRIu32 " B",
       pilot_pwm_gpio_num_,
       pilot_adc_gpio_num_,
       ct_adc_pin_ != nullptr ? "enabled" : "disabled",
@@ -112,7 +130,7 @@ void EVSEComponent::setup() {
 }
 
 void EVSEComponent::dump_config() {
-  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.5.0:");
+  ESP_LOGCONFIG(TAG, "ESPHome EVSE v0.5.1:");
   LOG_PIN("  Pilot PWM Pin: ", pilot_pwm_pin_);
   LOG_PIN("  Pilot ADC Pin: ", pilot_adc_pin_);
   if (ct_adc_pin_ != nullptr)
@@ -125,6 +143,8 @@ void EVSEComponent::dump_config() {
                   ct_ratio_, ct_burden_ohms_, ct_nominal_voltage_);
     ESP_LOGCONFIG(TAG, "  CT RMS window: %" PRIu32 " ms, noise floor: %.2f A",
                   ct_rms_window_ms_, ct_noise_floor_a_);
+    ESP_LOGCONFIG(TAG, "  Energy estimate: CT current x %.1f V, restored total %.3f kWh",
+                  ct_nominal_voltage_, total_energy_kwh_);
   }
   ESP_LOGCONFIG(TAG, "  EVSE task: core=%u priority=%u stack=%" PRIu32 " B", task_core_, task_priority_, task_stack_size_);
   ESP_LOGCONFIG(TAG, "  Timing debug: %s", YESNO(timing_debug_));
@@ -153,6 +173,7 @@ void EVSEComponent::loop() {
   if ((uint32_t) (now - last_publish_ms_) >= 500) {
     last_publish_ms_ = now;
     publish_();
+    persist_total_energy_(false);
   }
 }
 
@@ -163,6 +184,7 @@ void EVSEComponent::on_shutdown() {
     vTaskSuspend(task_handle_);
 #endif
   force_safe_outputs_();
+  persist_total_energy_(true);
 #ifdef USE_ESP32
   shutdown_adc_dma_();
   shutdown_pilot_pwm_();
@@ -195,6 +217,7 @@ void EVSEComponent::on_ota_global_state(ota::OTAState ota_state, float progress,
 #endif
 
     force_safe_outputs_();
+    persist_total_energy_(true);
     ESP_LOGW(TAG, "OTA started: contactor forced OFF, CP forced to -12 V, EVSE task suspended");
     return;
   }
@@ -861,7 +884,8 @@ void EVSEComponent::update_ct_measurement_(uint32_t now) {
   if (ct_window_started_ms_ == 0)
     ct_window_started_ms_ = now;
 
-  if ((uint32_t) (now - ct_window_started_ms_) < ct_rms_window_ms_)
+  const uint32_t window_ms = (uint32_t) (now - ct_window_started_ms_);
+  if (window_ms < ct_rms_window_ms_)
     return;
 
   if (ct_sample_count_ < 32) {
@@ -923,6 +947,8 @@ void EVSEComponent::update_ct_measurement_(uint32_t now) {
     ct_power_w_ = current_a * ct_nominal_voltage_;
   }
 
+  integrate_energy_(ct_power_w_, window_ms);
+
   ct_sum_raw_ = 0;
   ct_sum_sq_raw_ = 0;
   ct_sample_count_ = 0;
@@ -930,6 +956,49 @@ void EVSEComponent::update_ct_measurement_(uint32_t now) {
 #else
   (void) now;
 #endif
+}
+
+void EVSEComponent::integrate_energy_(float power_w, uint32_t window_ms) {
+  // Count only energy delivered while the EVSE power contactor is energized.
+  if (!contactor_on_ || power_w <= 0.0f || window_ms == 0)
+    return;
+
+  const float delta_kwh =
+      power_w * static_cast<float>(window_ms) / 3600000000.0f;
+
+  if (!std::isfinite(delta_kwh) || delta_kwh <= 0.0f)
+    return;
+
+  total_energy_kwh_ += delta_kwh;
+  session_energy_kwh_ += delta_kwh;
+}
+
+void EVSEComponent::persist_total_energy_(bool sync) {
+  if (!total_energy_pref_ready_)
+    return;
+
+  float value = 0.0f;
+#ifdef USE_ESP32
+  portENTER_CRITICAL(&data_mux_);
+#endif
+  value = snapshot_total_energy_kwh_;
+#ifdef USE_ESP32
+  portEXIT_CRITICAL(&data_mux_);
+#endif
+
+  if (!std::isfinite(value) || value < 0.0f)
+    return;
+
+  // On ESP32, ESPHome coalesces repeated preference saves in RAM and writes
+  // them according to the normal preferences flash-write interval.
+  if (sync || last_pref_queued_total_energy_kwh_ < 0.0f ||
+      std::fabs(value - last_pref_queued_total_energy_kwh_) >= 0.0005f) {
+    if (total_energy_pref_.save(&value))
+      last_pref_queued_total_energy_kwh_ = value;
+  }
+
+  if (sync && global_preferences != nullptr)
+    global_preferences->sync();
 }
 
 void EVSEComponent::update_adc_supervision_(uint32_t now) {
@@ -1324,8 +1393,9 @@ void EVSEComponent::close_contactor_() {
     contactor_pin_->digital_write(true);
 
   if (!contactor_on_) {
+    session_energy_kwh_ = 0.0f;
     contactor_on_ = true;
-    ESP_LOGI(TAG, "Contactor ON");
+    ESP_LOGI(TAG, "Contactor ON; session energy reset");
   }
 }
 
@@ -1405,6 +1475,8 @@ void EVSEComponent::update_snapshot_(uint32_t heartbeat_ms) {
   snapshot_advertised_current_ = pilot_mode_ == PilotMode::PWM ? current_limit_ : 0.0f;
   snapshot_charging_current_ = ct_current_a_;
   snapshot_charging_power_ = ct_power_w_;
+  snapshot_session_energy_kwh_ = session_energy_kwh_;
+  snapshot_total_energy_kwh_ = total_energy_kwh_;
   snapshot_contactor_on_ = contactor_on_;
   snapshot_graceful_stop_ = graceful_stop_active_;
   snapshot_task_heartbeat_ms_ = heartbeat_ms;
@@ -1432,6 +1504,8 @@ void EVSEComponent::publish_() {
   float advertised_current;
   float charging_current;
   float charging_power;
+  float session_energy;
+  float total_energy;
   bool contactor_on;
   bool graceful_stop;
   uint32_t heartbeat_ms;
@@ -1457,6 +1531,8 @@ void EVSEComponent::publish_() {
   advertised_current = snapshot_advertised_current_;
   charging_current = snapshot_charging_current_;
   charging_power = snapshot_charging_power_;
+  session_energy = snapshot_session_energy_kwh_;
+  total_energy = snapshot_total_energy_kwh_;
   contactor_on = snapshot_contactor_on_;
   graceful_stop = snapshot_graceful_stop_;
   heartbeat_ms = snapshot_task_heartbeat_ms_;
@@ -1490,6 +1566,10 @@ void EVSEComponent::publish_() {
     charging_current_sensor_->publish_state(charging_current);
   if (charging_power_sensor_ != nullptr)
     charging_power_sensor_->publish_state(charging_power);
+  if (session_energy_sensor_ != nullptr)
+    session_energy_sensor_->publish_state(session_energy);
+  if (total_energy_sensor_ != nullptr)
+    total_energy_sensor_->publish_state(total_energy);
   if (task_late_cycles_sensor_ != nullptr)
     task_late_cycles_sensor_->publish_state(late_cycles);
   if (task_max_runtime_sensor_ != nullptr)

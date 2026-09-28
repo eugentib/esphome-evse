@@ -58,6 +58,8 @@ CONF_CP_LOW_MV = "cp_low_mv"
 CONF_ADVERTISED_CURRENT = "advertised_current"
 CONF_CHARGING_CURRENT = "charging_current"
 CONF_CHARGING_POWER = "charging_power"
+CONF_SESSION_ENERGY = "session_energy"
+CONF_TOTAL_ENERGY = "total_energy"
 CONF_TASK_LATE_CYCLES = "task_late_cycles"
 CONF_TASK_MAX_RUNTIME = "task_max_runtime"
 CONF_TASK_LAST_RUNTIME = "task_last_runtime"
@@ -138,10 +140,32 @@ CONFIG_SCHEMA = cv.Schema({
         unit_of_measurement="A", accuracy_decimals=1, icon="mdi:current-ac"
     ),
     cv.Optional(CONF_CHARGING_CURRENT): sensor.sensor_schema(
-        unit_of_measurement="A", accuracy_decimals=2, icon="mdi:current-ac"
+        unit_of_measurement="A",
+        accuracy_decimals=2,
+        device_class="current",
+        state_class="measurement",
+        icon="mdi:current-ac",
     ),
     cv.Optional(CONF_CHARGING_POWER): sensor.sensor_schema(
-        unit_of_measurement="W", accuracy_decimals=0, icon="mdi:flash"
+        unit_of_measurement="W",
+        accuracy_decimals=0,
+        device_class="power",
+        state_class="measurement",
+        icon="mdi:flash",
+    ),
+    cv.Optional(CONF_SESSION_ENERGY): sensor.sensor_schema(
+        unit_of_measurement="kWh",
+        accuracy_decimals=3,
+        device_class="energy",
+        state_class="total_increasing",
+        icon="mdi:lightning-bolt",
+    ),
+    cv.Optional(CONF_TOTAL_ENERGY): sensor.sensor_schema(
+        unit_of_measurement="kWh",
+        accuracy_decimals=3,
+        device_class="energy",
+        state_class="total_increasing",
+        icon="mdi:counter",
     ),
     cv.Optional(CONF_TASK_LATE_CYCLES): sensor.sensor_schema(
         accuracy_decimals=0, icon="mdi:timer-alert-outline"
@@ -219,8 +243,16 @@ def _validate(config):
     if config[CONF_CT_RMS_WINDOW].total_milliseconds < 100:
         raise cv.Invalid("ct_rms_window must be at least 100ms")
 
-    if (CONF_CHARGING_CURRENT in config or CONF_CHARGING_POWER in config) and CONF_CT_ADC_PIN not in config:
-        raise cv.Invalid("charging_current/charging_power require ct_adc_pin")
+    ct_sensor_keys = (
+        CONF_CHARGING_CURRENT,
+        CONF_CHARGING_POWER,
+        CONF_SESSION_ENERGY,
+        CONF_TOTAL_ENERGY,
+    )
+    if any(key in config for key in ct_sensor_keys) and CONF_CT_ADC_PIN not in config:
+        raise cv.Invalid(
+            "charging_current/charging_power/session_energy/total_energy require ct_adc_pin"
+        )
     if config[CONF_ADC_PEAK_SAMPLES] * 2 >= config[CONF_ADC_MIN_SAMPLES]:
         raise cv.Invalid("adc_peak_samples is too large relative to adc_min_samples")
 
@@ -338,6 +370,12 @@ async def to_code(config):
     if CONF_CHARGING_POWER in config:
         ent = await sensor.new_sensor(config[CONF_CHARGING_POWER])
         cg.add(var.set_charging_power_sensor(ent))
+    if CONF_SESSION_ENERGY in config:
+        ent = await sensor.new_sensor(config[CONF_SESSION_ENERGY])
+        cg.add(var.set_session_energy_sensor(ent))
+    if CONF_TOTAL_ENERGY in config:
+        ent = await sensor.new_sensor(config[CONF_TOTAL_ENERGY])
+        cg.add(var.set_total_energy_sensor(ent))
     if timing_debug:
         if CONF_TASK_LATE_CYCLES in config:
             ent = await sensor.new_sensor(config[CONF_TASK_LATE_CYCLES])

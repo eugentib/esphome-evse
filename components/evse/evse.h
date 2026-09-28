@@ -6,6 +6,7 @@
 #include "esphome/core/component.h"
 #include "esphome/core/gpio.h"
 #include "esphome/core/log.h"
+#include "esphome/core/preferences.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
@@ -112,6 +113,8 @@ class EVSEComponent : public Component
   void set_advertised_current_sensor(sensor::Sensor *s) { advertised_current_sensor_ = s; }
   void set_charging_current_sensor(sensor::Sensor *s) { charging_current_sensor_ = s; }
   void set_charging_power_sensor(sensor::Sensor *s) { charging_power_sensor_ = s; }
+  void set_session_energy_sensor(sensor::Sensor *s) { session_energy_sensor_ = s; }
+  void set_total_energy_sensor(sensor::Sensor *s) { total_energy_sensor_ = s; }
   void set_task_late_cycles_sensor(sensor::Sensor *s) { task_late_cycles_sensor_ = s; }
   void set_task_max_runtime_sensor(sensor::Sensor *s) { task_max_runtime_sensor_ = s; }
   void set_task_last_runtime_sensor(sensor::Sensor *s) { task_last_runtime_sensor_ = s; }
@@ -155,6 +158,8 @@ class EVSEComponent : public Component
 #endif
   void sample_cp_();
   void update_ct_measurement_(uint32_t now);
+  void integrate_energy_(float power_w, uint32_t window_ms);
+  void persist_total_energy_(bool sync);
   void update_adc_supervision_(uint32_t now);
   CpLevel classify_cp_(uint16_t high_mv) const;
   void update_stable_cp_(CpLevel sampled, uint32_t now);
@@ -202,6 +207,8 @@ class EVSEComponent : public Component
   sensor::Sensor *advertised_current_sensor_{nullptr};
   sensor::Sensor *charging_current_sensor_{nullptr};
   sensor::Sensor *charging_power_sensor_{nullptr};
+  sensor::Sensor *session_energy_sensor_{nullptr};
+  sensor::Sensor *total_energy_sensor_{nullptr};
   sensor::Sensor *task_late_cycles_sensor_{nullptr};
   sensor::Sensor *task_max_runtime_sensor_{nullptr};
   sensor::Sensor *task_last_runtime_sensor_{nullptr};
@@ -301,6 +308,11 @@ class EVSEComponent : public Component
   uint32_t ct_window_started_ms_{0};
   float ct_current_a_{0.0f};
   float ct_power_w_{0.0f};
+  float session_energy_kwh_{0.0f};
+  float total_energy_kwh_{0.0f};
+  ESPPreferenceObject total_energy_pref_{};
+  bool total_energy_pref_ready_{false};
+  float last_pref_queued_total_energy_kwh_{-1.0f};
 
   CpLevel sampled_cp_{CpLevel::UNKNOWN};
   CpLevel candidate_cp_{CpLevel::UNKNOWN};
@@ -335,6 +347,8 @@ class EVSEComponent : public Component
   float snapshot_advertised_current_{0.0f};
   float snapshot_charging_current_{0.0f};
   float snapshot_charging_power_{0.0f};
+  float snapshot_session_energy_kwh_{0.0f};
+  float snapshot_total_energy_kwh_{0.0f};
   bool snapshot_contactor_on_{false};
   bool snapshot_graceful_stop_{false};
   uint32_t snapshot_task_heartbeat_ms_{0};

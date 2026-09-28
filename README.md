@@ -2,11 +2,45 @@
 
 Experimental IEC 61851 / SAE J1772 basic-signaling EVSE controller implemented as an ESPHome external component.
 
-**Current version: v0.5.0**  
+**Current version: v0.5.1**  
 **Framework: native ESP-IDF**  
 **Target:** classic dual-core ESP32 / ESP32 Relay X2, single phase, fixed Type 2 cable.
 
 > Experimental DIY EVSE firmware. It is not a certified safety controller.
+
+## v0.5.1
+
+### Native energy sensors
+
+The firmware now integrates CT-derived charging power and exposes:
+
+```text
+EVSE Session Energy   kWh
+EVSE Total Energy     kWh
+```
+
+Add:
+
+```yaml
+session_energy:
+  name: "EVSE Session Energy"
+
+total_energy:
+  name: "EVSE Total Energy"
+```
+
+Both use `device_class: energy` and `state_class: total_increasing`. The Total
+Energy entity can therefore be selected directly in Home Assistant's Energy
+Dashboard.
+
+Energy remains an estimate because power is calculated as measured CT RMS
+current multiplied by `ct_nominal_voltage` (230 V in the supplied example),
+assuming PF approximately 1.
+
+Session energy resets when the power contactor is newly energized. Total energy
+is restored across reboot using ESPHome entity preferences. Preference saves
+are queued/coalesced by ESPHome; OTA and clean shutdown explicitly flush the
+latest total only after the EVSE has already been forced into its safe state.
 
 ## v0.5.0
 

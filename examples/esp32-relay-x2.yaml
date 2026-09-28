@@ -116,7 +116,7 @@ evse:
   ct_rms_window: 200ms
   ct_noise_floor: 0.15
 
-  # v0.5.0 controls the onboard relay directly from the dedicated EVSE task.
+  # v0.5.1 controls the onboard relay directly from the dedicated EVSE task.
   # On ESP32 Relay X2, relay 1 is GPIO16. It must drive only an EXTERNAL
   # contactor coil, never the EV charging current itself.
   contactor_pin: GPIO16
@@ -198,6 +198,10 @@ evse:
     name: "EVSE Measured Charging Current"
   charging_power:
     name: "EVSE Estimated Charging Power"
+  session_energy:
+    name: "EVSE Session Energy"
+  total_energy:
+    name: "EVSE Total Energy"
   # These entities are created only while timing_debug: true.
   task_late_cycles:
     name: "EVSE Task Late Cycles"
